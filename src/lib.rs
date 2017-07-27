@@ -201,10 +201,10 @@ impl Schema {
         gather_definitions_vec(&self.any_of, format!("{}/anyOf", path), schema_map)?;
         gather_definitions_vec(&self.one_of, format!("{}/oneOf", path), schema_map)?;
         if let Some(ref schema) = self.not {
-            schema.gather_definitions(
-                format!("{}/not", path),
-                schema_map,
-            )?
+            schema.gather_definitions(format!("{}/not", path), schema_map)?
+        }
+        if let Some(SchemaOrSchemas::Schema(ref schema)) = self.items {
+            schema.gather_definitions(format!("{}/items", path), schema_map)?
         }
         Ok(())
     }
@@ -223,19 +223,19 @@ impl Schema {
 
     fn typename(&self, uri: &str, map: &Map<Schema>) -> Result<String> {
         // assume it is already validated
-        let (realuri, realschema) = self.resolve(uri, map)?;
-        Ok(realschema.typename_(realuri))
-    }
+        fn typename_(schema: &Schema, uri: &str) -> String {
+            schema.type_
+                .as_ref()
+                .and_then(|type_or_vec| match *type_or_vec {
+                    SimpleTypeOrSimpleTypes::SimpleType(st) => st.native_typename(),
+                    _ => None,  // We will need an enum
+                })
+                .map(|name| name.into())
+                .unwrap_or("JsonValue".into())
+        }
 
-    fn typename_(&self, uri: &str) -> String {
-        self.type_
-            .as_ref()
-            .and_then(|type_or_vec| match *type_or_vec {
-                SimpleTypeOrSimpleTypes::SimpleType(st) => st.native_typename(),
-                _ => None,  // We will need an enum
-            })
-            .map(|name| name.into())
-            .unwrap_or("JsonValue".into())
+        let (realuri, realschema) = self.resolve(uri, map)?;
+        Ok(typename_(realschema, realuri))
     }
 
     fn is_primitive(&self) -> bool {
@@ -254,31 +254,50 @@ impl Schema {
     }
 
 
-    fn renderable(&self, uri: &str, map: &Map<Schema>) -> Result<SchemaType> {
-        if self.is_primitive() {
-            return Ok(SchemaType::Primitive);
+    fn to_renderable(&self, uri: &str, map: &Map<Schema>) -> Result<SchemaType> {
+        use SimpleType::{Object, Boolean, String, Null, Integer, Number};
+        let name = name_from_uri(uri);
+        let default = SimpleTypeOrSimpleTypes::SimpleType(Object);
+        match *self.type_.as_ref().unwrap_or(&default) {
+            SimpleTypeOrSimpleTypes::SimpleTypes(_) => {
+                bail!("Multiple types not supported")
+            },
+            SimpleTypeOrSimpleTypes::SimpleType(st) => match st {
+                Boolean | Integer | Null | Number | String => Ok(SchemaType::Primitive),
+                SimpleType::Array => {
+                    let tags = vec![];
+                    let inner = {
+                        match self.items {
+                            Some(SchemaOrSchemas::Schema(ref schema)) => schema.typename(uri, map)?,
+                            Some(SchemaOrSchemas::Schemas(_)) => bail!("Multiple items not supported in schema {}", uri),
+                            _ => bail!("Item not found for schema {}", uri)
+                        }
+                    };
+                    Ok(SchemaType::Array(Array { name, tags, inner }))
+                },
+                Object => {
+                    let fields = self.properties.as_ref().unwrap_or(&Map::new())
+                        .iter()
+                        .map(|(name, schema)| {
+                            let tags = vec![];
+                            let type_ = schema.typename(uri, map)?;
+                            Ok(Field {
+                                name: name.clone(),
+                                type_,
+                                tags,
+                            })
+                        })
+                        .collect::<Result<Vec<Field>>>()?;
+                    let tags = vec![];
+                    Ok(SchemaType::Struct(Struct { name, tags, fields }))
+                }
+            }
         }
-        if self.properties.is_none() {
-            return Ok(SchemaType::Primitive);
-        }
-        let tags = vec![];
-        let fields = self.properties
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|(name, schema)| {
-                let tags = vec![];
-                let type_ = schema.typename(uri, map)?;
-                Ok(Field {
-                    name: name.clone(),
-                    type_,
-                    tags,
-                })
-            })
-            .collect::<Result<Vec<Field>>>()?;
-        let name = uri.into(); // TODO
-        Ok(SchemaType::Struct(Struct { name, tags, fields }))
     }
+}
+
+fn name_from_uri(uri: &str) -> String {
+    uri.split("/").last().unwrap().into()
 }
 
 fn gather_definitions_map(
@@ -337,15 +356,10 @@ impl RootSchema {
         Ok(map)
     }
 
-    fn renderables(&self) -> Result<Vec<Struct>> {
+    fn renderables(&self) -> Result<Vec<SchemaType>> {
         let map = self.gather_definitions()?;
         map.iter()
-            .map(|(uri, schema)| schema.renderable(uri, &map))
-            .filter_map(|renderable| match renderable {
-                Err(e) => Some(Err(e)),
-                Ok(SchemaType::Struct(s)) => Some(Ok(s)),
-                Ok(_) => None,
-            })
+            .map(|(uri, schema)| schema.to_renderable(uri, &map))
             .collect()
     }
 
@@ -355,7 +369,7 @@ impl RootSchema {
     }
 }
 
-fn render_all(renderables: &Vec<Struct>) -> Tokens {
+fn render_all(renderables: &Vec<SchemaType>) -> Tokens {
     renderables.iter().fold(Tokens::new(), |mut tokens, renderable| {
         renderable.to_tokens(&mut tokens);
         tokens
@@ -396,9 +410,21 @@ pub enum BoolOrSchema {
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 enum SchemaType {
     Primitive,
-    Array,
+    Array(Array),
     Enum(Enum),
     Struct(Struct),
+}
+
+impl ToTokens for SchemaType {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        use SchemaType::*;
+        match *self {
+            Primitive => {},  // No need to render a primitive
+            Array(ref elem) => elem.to_tokens(tokens),
+            Enum(ref elem) => elem.to_tokens(tokens),
+            Struct(ref elem) => elem.to_tokens(tokens),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -446,9 +472,42 @@ impl ToTokens for Field {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 struct Enum {
-    variants: Vec<String>,
+    tags: Vec<String>,
+    variants: Vec<(String, String)>,
 }
 
+impl ToTokens for Enum {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        let tags = &self.tags;
+        let names = self.variants.iter().map(|v| &v.0);
+        let types = self.variants.iter().map(|v| &v.1);
+        let tok = quote! {
+            #(#tags),*
+            #(#names: #types),*
+        };
+        tokens.append(tok);
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+pub struct Array {
+    name: String,
+    tags: Vec<String>,
+    inner: String
+}
+
+impl ToTokens for Array {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        let tags = &self.tags;
+        let name = &self.name;
+        let inner = &self.inner;
+        let tok = quote! {
+            #(#tags),*
+            type #name = Vec<#inner>;
+        };
+        tokens.append(tok);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -472,7 +531,7 @@ mod tests {
     fn gather_schemas() {
         let root = metaschema();
         let map = root.gather_definitions().unwrap();
-        assert_eq!(map.len(), 48)
+        assert_eq!(map.len(), 51)
     }
 
     #[test]
