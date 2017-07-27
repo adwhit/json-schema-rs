@@ -16,7 +16,7 @@ use std::path::Path;
 use std::io::prelude::*;
 use std::collections::BTreeMap;
 use std::fmt;
-use quote::Tokens;
+use quote::{Tokens, ToTokens};
 
 use errors::*;
 
@@ -242,7 +242,7 @@ impl Schema {
         self.type_
             .as_ref()
             .map(|type_or_vec| match *type_or_vec {
-                SimpleTypeOrSimpleTypes::SimpleType(st) => true,
+                SimpleTypeOrSimpleTypes::SimpleType(st) => st.is_primitive(),
                 _ => false,
             })
             .unwrap_or(false)
@@ -279,21 +279,6 @@ impl Schema {
         let name = uri.into(); // TODO
         Ok(SchemaType::Struct(Struct { name, tags, fields }))
     }
-}
-
-fn gather_definitions_box(
-    maybe_schma: &Option<Box<Schema>>,
-    path: String,
-    schema_map: &mut Map<Schema>,
-) -> Result<()> {
-    if let Some(ref schema) = *maybe_schma {
-        let previous = schema_map.insert(path.clone(), *schema.clone());
-        if previous.is_some() {
-            bail!("Schema already exists at location {}", path)
-        };
-        schema.gather_definitions(path, schema_map)?;
-    }
-    Ok(())
 }
 
 fn gather_definitions_map(
@@ -354,12 +339,27 @@ impl RootSchema {
 
     fn renderables(&self) -> Result<Vec<Struct>> {
         let map = self.gather_definitions()?;
-        // map
-        //     .iter()
-        //     .map(|(uri, schema)| schema.renderable(uri, map))
-        unimplemented!()
-
+        map.iter()
+            .map(|(uri, schema)| schema.renderable(uri, &map))
+            .filter_map(|renderable| match renderable {
+                Err(e) => Some(Err(e)),
+                Ok(SchemaType::Struct(s)) => Some(Ok(s)),
+                Ok(_) => None,
+            })
+            .collect()
     }
+
+    pub fn render_all(&self) -> Result<Tokens> {
+        let renderables = self.renderables()?;
+        Ok(render_all(&renderables))
+    }
+}
+
+fn render_all(renderables: &Vec<Struct>) -> Tokens {
+    renderables.iter().fold(Tokens::new(), |mut tokens, renderable| {
+        renderable.to_tokens(&mut tokens);
+        tokens
+    })
 }
 
 fn resolve_definitions(map: &Map<Schema>) -> Vec<(&str, &Schema)> {
@@ -408,6 +408,22 @@ pub struct Struct {
     fields: Vec<Field>,
 }
 
+impl ToTokens for Struct {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        let name = &self.name;
+        let fields = &self.fields;
+        let tags = &self.tags;
+        let tok = quote! {
+            #(#tags),*
+            pub struct #name {
+                #(#fields),*
+
+            }
+        };
+        tokens.append(tok)
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Field {
     name: String,
@@ -415,27 +431,16 @@ pub struct Field {
     tags: Vec<String>,
 }
 
-
-
-impl Struct {
-    fn render(&self) -> Tokens {
-        let fields = self.fields.iter().map(|f| f.render());
-        quote! {
-            #(self.tags),*
-            pub struct #(self.name) {
-                #(fields),*
-
-            }
-        }
-    }
-}
-
-impl Field {
-    fn render(&self) -> Tokens {
-        quote! {
-            #(tags),*
-            #(self.name): #(self.type_)
-        }
+impl ToTokens for Field {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        let name = &self.name;
+        let tags = &self.tags;
+        let type_ = &self.type_;
+        let tok = quote! {
+            #(#tags),*
+            #name: #type_
+        };
+        tokens.append(tok);
     }
 }
 
@@ -467,13 +472,20 @@ mod tests {
     fn gather_schemas() {
         let root = metaschema();
         let map = root.gather_definitions().unwrap();
-        assert_eq!(map.len(), 47)
+        assert_eq!(map.len(), 48)
     }
 
     #[test]
-    fn gather_renderables() {
+    fn test_gather_renderables() {
         let root = metaschema();
-        let map = root.gather_definitions().unwrap();
-        assert_eq!(map.len(), 47)
+        let renderable = root.renderables().unwrap();
+        assert_eq!(renderable.len(), 1)
+    }
+
+    #[test]
+    fn test_render() {
+        let root = metaschema();
+        let tokens = root.render_all().unwrap();
+        println!("{}", tokens)
     }
 }
