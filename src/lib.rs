@@ -15,7 +15,7 @@ use std::path::Path;
 use std::io::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use quote::{Tokens, ToTokens};
+use quote::{Tokens, ToTokens, Ident};
 
 use errors::*;
 
@@ -275,7 +275,7 @@ impl Schema {
                         Ok(SchemaType::Array(Array { name, tags, inner }))
                     }
                     Object => {
-                        let required: HashSet<String> = self.required
+                        let required_keys: HashSet<String> = self.required
                             .as_ref()
                             .map(|v| v.iter().map(|s| s.clone()).collect())
                             .unwrap_or(HashSet::new());
@@ -284,9 +284,9 @@ impl Schema {
                             .unwrap_or(&Map::new())
                             .iter()
                             .map(|(name, schema)| {
-                                let required = required.contains(name);
+                                let is_required = required_keys.contains(name);
                                 let tags = vec![];
-                                let type_ = schema.typename(root, uri, required, map)?;
+                                let type_ = schema.typename(root, uri, is_required, map)?;
                                 Ok(Field {
                                     name: name.clone(),
                                     type_,
@@ -366,8 +366,9 @@ impl RootSchema {
 
     fn renderables(&self, root: &str) -> Result<Vec<SchemaType>> {
         let map = self.gather_definitions()?;
-        map.iter()
-            .map(|(uri, schema)| schema.to_renderable(root, uri, &map))
+        let defns = resolve_definitions(&map);
+        defns.iter()
+            .map(|&(uri, schema)| schema.to_renderable(root, uri, &map))
             .collect()
     }
 
@@ -388,7 +389,7 @@ fn render_all(renderables: &Vec<SchemaType>) -> Tokens {
 }
 
 fn resolve_definitions(map: &Map<Schema>) -> Vec<(&str, &Schema)> {
-    // delivers the list of schemas we actually need to create
+    // Filter out schemas which are just references to other schemas
     map.iter()
         .filter(|&(_uri, schema)| schema.ref_.is_none())
         .map(|(uri, schema)| (uri.as_str(), schema))
@@ -447,9 +448,9 @@ pub struct Struct {
 
 impl ToTokens for Struct {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        let name = &self.name;
+        let name = Ident::new(&*self.name);
         let fields = &self.fields;
-        let tags = &self.tags;
+        let tags: Vec<_> = self.tags.iter().map(|t| Ident::new(t.as_str())).collect();
         let tok =
             quote! {
             #(#tags),*
@@ -471,9 +472,9 @@ pub struct Field {
 
 impl ToTokens for Field {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        let name = &self.name;
-        let tags = &self.tags;
-        let type_ = &self.type_;
+        let name = Ident::new(&*self.name);
+        let tags: Vec<_> = self.tags.iter().map(|t| Ident::new(t.as_str())).collect();
+        let type_ = Ident::new(&*self.type_);
         let tok =
             quote! {
             #(#tags),*
@@ -485,19 +486,23 @@ impl ToTokens for Field {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 struct Enum {
+    name: String,
     tags: Vec<String>,
     variants: Vec<(String, String)>,
 }
 
 impl ToTokens for Enum {
     fn to_tokens(&self, tokens: &mut Tokens) {
+        let name = &self.name;
         let tags = &self.tags;
         let names = self.variants.iter().map(|v| &v.0);
         let types = self.variants.iter().map(|v| &v.1);
         let tok =
             quote! {
             #(#tags),*
-            #(#names: #types),*
+            pub enum #name {
+                #(#names: #types),*
+            }
         };
         tokens.append(tok);
     }
@@ -512,9 +517,9 @@ pub struct Array {
 
 impl ToTokens for Array {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        let tags = &self.tags;
-        let name = &self.name;
-        let inner = &self.inner;
+        let name = Ident::new(&*self.name);
+        let tags: Vec<_> = self.tags.iter().map(|t| Ident::new(t.as_str())).collect();
+        let inner = Ident::new(&*self.inner);
         let tok =
             quote! {
             #(#tags),*
@@ -559,6 +564,6 @@ mod tests {
     fn test_render() {
         let root = metaschema();
         let tokens = root.render_all("schema").unwrap();
-        println!("{}", tokens.as_str())
+        println!("{}", tokens.into_string())
     }
 }
