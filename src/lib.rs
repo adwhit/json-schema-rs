@@ -161,43 +161,103 @@ impl fmt::Display for Schema {
 
 
 impl Schema {
-    pub fn from_reader_yaml<R: Read>(reader: R) -> Result<Schema> {
-        Ok(serde_yaml::from_reader(reader)?)
-    }
-
-    pub fn from_file_yaml<P: AsRef<Path>>(path: P) -> Result<Schema> {
-        Schema::from_reader_yaml(File::open(path)?)
-    }
-
-    pub fn from_reader_json<R: Read>(reader: R) -> Result<Schema> {
-        Ok(serde_json::from_reader(reader)?)
-    }
-
-    pub fn from_file_json<P: AsRef<Path>>(path: P) -> Result<Schema> {
-        Schema::from_reader_json(File::open(path)?)
-    }
-
-    pub fn gather_definitions(&self, path: &str, schema_map: &mut Map<Schema>) -> Result<()> {
-        gather_definitions(&self.definitions, &format!("{}/definitions", path), schema_map)?;
-        gather_definitions(&self.properties, &format!("{}/properties", path), schema_map)?;
-        gather_definitions(&self.pattern_properties, &format!("{}/pattern_properties", path), schema_map)?;
+    /// find every instance in which a schema is defined or referenced
+    pub fn gather_definitions(&self, path: String, schema_map: &mut Map<Schema>) -> Result<()> {
+        gather_definitions_map(&self.definitions, format!("{}/definitions", path), schema_map)?;
+        gather_definitions_map(&self.properties, format!("{}/properties", path), schema_map)?;
+        gather_definitions_map(&self.pattern_properties, format!("{}/patternProperties", path), schema_map)?;
+        gather_definitions_vec(&self.all_of, format!("{}/allOf", path), schema_map)?;
+        gather_definitions_vec(&self.any_of, format!("{}/anyOf", path), schema_map)?;
+        gather_definitions_vec(&self.one_of, format!("{}/oneOf", path), schema_map)?;
+        gather_definitions_box(&self.not, format!("{}/not", path), schema_map)?;
         Ok(())
+    }
+
+    // TODO is this function actually necessary?
+    fn resolve<'a>(&'a self, path: &'a str, map: &'a Map<Schema>) -> Result<&'a Schema> {
+        if let Some(ref ref_) = self.ref_ {
+            map.get(path).ok_or_else(|| format!("Failed to resolve reference '{}'", ref_).into())
+        } else {
+            Ok(&self)
+        }
     }
 
 }
 
-fn gather_definitions(maybe_schma_map: &Option<Map<Schema>>, path: &str, schema_map: &mut Map<Schema>) -> Result<()> {
+fn gather_definitions_box(maybe_schma: &Option<Box<Schema>>, path: String, schema_map: &mut Map<Schema>) -> Result<()> {
+    if let Some(ref schema) = *maybe_schma {
+        let previous = schema_map.insert(path.clone(), *schema.clone());
+        if previous.is_some() {
+            bail!("Schema already exists at location {}", path)
+        };
+        schema.gather_definitions(path, schema_map)?;
+    }
+    Ok(())
+}
+
+fn gather_definitions_map(maybe_schma_map: &Option<Map<Schema>>, path: String, schema_map: &mut Map<Schema>) -> Result<()> {
     if let Some(ref map) = *maybe_schma_map {
-        for (name, prop) in map {
+        for (name, schema) in map {
             let current_path = format!("{}/{}", path, name);
-            let previous = schema_map.insert(current_path.clone(), prop.clone());
+            let previous = schema_map.insert(current_path.clone(), schema.clone());
             if previous.is_some() {
                 bail!("Schema already exists at location {}", current_path)
             };
-            prop.gather_definitions(&current_path, schema_map)?;
+            schema.gather_definitions(current_path, schema_map)?;
         }
     }
     Ok(())
+}
+
+fn gather_definitions_vec(maybe_schma_vec: &Option<SchemaArray>, path: String, schema_map: &mut Map<Schema>) -> Result<()> {
+    if let Some(ref schemas) = *maybe_schma_vec {
+        for (ix, schema) in schemas.iter().enumerate() {
+            let current_path = format!("{}/{}", path, ix);
+            let previous = schema_map.insert(current_path.clone(), schema.clone());
+            if previous.is_some() {
+                bail!("Schema already exists at location {}", current_path)
+            };
+            schema.gather_definitions(current_path, schema_map)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
+struct RootSchema(Schema);
+
+impl RootSchema {
+    pub fn from_reader_yaml<R: Read>(reader: R) -> Result<RootSchema> {
+        Ok(serde_yaml::from_reader(reader)?)
+    }
+
+    pub fn from_file_yaml<P: AsRef<Path>>(path: P) -> Result<RootSchema> {
+        RootSchema::from_reader_yaml(File::open(path)?)
+    }
+
+    pub fn from_reader_json<R: Read>(reader: R) -> Result<RootSchema> {
+        Ok(serde_json::from_reader(reader)?)
+    }
+
+    pub fn from_file_json<P: AsRef<Path>>(path: P) -> Result<RootSchema> {
+        RootSchema::from_reader_json(File::open(path)?)
+    }
+}
+
+impl RootSchema {
+    fn gather_definitions(&self) -> Result<Map<Schema>> {
+        let mut map = Map::new();
+        self.0.gather_definitions("#".into(), &mut map)?;
+        Ok(map)
+    }
+}
+
+fn resolve_definitions(map: &Map<Schema>) -> Vec<(&str, &Schema)> {
+    // delivers the list of schemas we actually need to create
+    map.iter()
+        .filter(|&(uri, schema)| schema.ref_.is_none())
+        .map(|(uri, schema)| (uri.as_str(), schema))
+        .collect()
 }
 
 type Schemas = Vec<Schema>;
@@ -248,25 +308,24 @@ struct UntaggedEnumWrapper {
 mod tests {
     use super::*;
 
-    fn metaschema() -> Schema {
-        Schema::from_file_json("metaschema-draft4.json").unwrap()
+    fn metaschema() -> RootSchema {
+        RootSchema::from_file_json("test_schemas/metaschema-draft4.json").unwrap()
     }
 
     #[test]
     fn load_openapi3_schema() {
-         Schema::from_file_yaml("openapi3-schema.yaml").unwrap();
+         RootSchema::from_file_yaml("test_schemas/openapi3-schema.yaml").unwrap();
     }
 
     #[test]
     fn load_meta_schema() {
-        Schema::from_file_json("metaschema-draft4.json").unwrap();
+        RootSchema::from_file_json("test_schemas/metaschema-draft4.json").unwrap();
     }
 
     #[test]
     fn gather_schemas() {
-        let schema = metaschema();
-        let mut map = Map::new();
-        schema.gather_definitions("#".into(), &mut map).unwrap();
+        let root = metaschema();
+        let map = root.gather_definitions().unwrap();
         for (e, s) in map {
             println!("{}: {}", e, s)
         }
