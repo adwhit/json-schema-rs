@@ -3,7 +3,6 @@ extern crate error_chain;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-#[macro_use]
 extern crate serde_json;
 extern crate serde_yaml;
 extern crate inflector;
@@ -14,7 +13,7 @@ extern crate rustfmt;
 use std::fs::File;
 use std::path::Path;
 use std::io::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use quote::{Tokens, ToTokens};
 
@@ -32,6 +31,8 @@ mod errors {
 
 // TODO: lazy-static this
 mod keywords;
+
+const GENERIC_TYPE: &str = "serde_json::Value";
 
 pub type PositiveInteger = i64;
 pub type PositiveIntegerDefault0 = serde_json::Value;
@@ -71,14 +72,6 @@ impl SimpleType {
             Object | Array => return None,
         };
         Some(name)
-    }
-
-    fn is_primitive(&self) -> bool {
-        use SimpleType::*;
-        match *self {
-            Object | Array => false,
-            _ => true,
-        }
     }
 }
 
@@ -201,10 +194,16 @@ impl Schema {
         gather_definitions_vec(&self.any_of, format!("{}/anyOf", path), schema_map)?;
         gather_definitions_vec(&self.one_of, format!("{}/oneOf", path), schema_map)?;
         if let Some(ref schema) = self.not {
-            schema.gather_definitions(format!("{}/not", path), schema_map)?
+            schema.gather_definitions(
+                format!("{}/not", path),
+                schema_map,
+            )?
         }
         if let Some(SchemaOrSchemas::Schema(ref schema)) = self.items {
-            schema.gather_definitions(format!("{}/items", path), schema_map)?
+            schema.gather_definitions(
+                format!("{}/items", path),
+                schema_map,
+            )?
         }
         Ok(())
     }
@@ -221,31 +220,27 @@ impl Schema {
         }
     }
 
-    fn typename(&self, uri: &str, map: &Map<Schema>) -> Result<String> {
+    fn typename(&self, root: &str, uri: &str, required: bool, map: &Map<Schema>) -> Result<String> {
         // assume it is already validated
-        fn typename_(schema: &Schema, uri: &str) -> String {
-            schema.type_
+        fn typename_(root: &str, schema: &Schema, uri: &str, required: bool) -> String {
+            let type_ = schema
+                .type_
                 .as_ref()
                 .and_then(|type_or_vec| match *type_or_vec {
                     SimpleTypeOrSimpleTypes::SimpleType(st) => st.native_typename(),
                     _ => None,  // We will need an enum
                 })
                 .map(|name| name.into())
-                .unwrap_or("JsonValue".into())
+                .unwrap_or(uri_to_name(root, uri).to_string());
+            if required {
+                type_
+            } else {
+                format!("Option<{}>", type_)
+            }
         }
 
         let (realuri, realschema) = self.resolve(uri, map)?;
-        Ok(typename_(realschema, realuri))
-    }
-
-    fn is_primitive(&self) -> bool {
-        self.type_
-            .as_ref()
-            .map(|type_or_vec| match *type_or_vec {
-                SimpleTypeOrSimpleTypes::SimpleType(st) => st.is_primitive(),
-                _ => false,
-            })
-            .unwrap_or(false)
+        Ok(typename_(root, realschema, realuri, required))
     }
 
     fn validate(&self) -> Result<()> {
@@ -253,51 +248,64 @@ impl Schema {
         unimplemented!()
     }
 
-
-    fn to_renderable(&self, uri: &str, map: &Map<Schema>) -> Result<SchemaType> {
-        use SimpleType::{Object, Boolean, String, Null, Integer, Number};
-        let name = name_from_uri(uri);
+    fn to_renderable(&self, root: &str, uri: &str, map: &Map<Schema>) -> Result<SchemaType> {
+        use SimpleType::{Object, Boolean, Null, Integer, Number};
+        let name = uri_to_name(root, uri).to_string();
         let default = SimpleTypeOrSimpleTypes::SimpleType(Object);
         match *self.type_.as_ref().unwrap_or(&default) {
-            SimpleTypeOrSimpleTypes::SimpleTypes(_) => {
-                bail!("Multiple types not supported")
-            },
-            SimpleTypeOrSimpleTypes::SimpleType(st) => match st {
-                Boolean | Integer | Null | Number | String => Ok(SchemaType::Primitive),
-                SimpleType::Array => {
-                    let tags = vec![];
-                    let inner = {
-                        match self.items {
-                            Some(SchemaOrSchemas::Schema(ref schema)) => schema.typename(uri, map)?,
-                            Some(SchemaOrSchemas::Schemas(_)) => bail!("Multiple items not supported in schema {}", uri),
-                            _ => bail!("Item not found for schema {}", uri)
-                        }
-                    };
-                    Ok(SchemaType::Array(Array { name, tags, inner }))
-                },
-                Object => {
-                    let fields = self.properties.as_ref().unwrap_or(&Map::new())
-                        .iter()
-                        .map(|(name, schema)| {
-                            let tags = vec![];
-                            let type_ = schema.typename(uri, map)?;
-                            Ok(Field {
-                                name: name.clone(),
-                                type_,
-                                tags,
+            SimpleTypeOrSimpleTypes::SimpleTypes(_) => bail!("Multiple types not supported"),
+            SimpleTypeOrSimpleTypes::SimpleType(st) => {
+                match st {
+                    Boolean | Integer | Null | Number | SimpleType::String => Ok(
+                        SchemaType::Primitive,
+                    ),
+                    SimpleType::Array => {
+                        let tags = vec![];
+                        let inner = {
+                            match self.items {
+                                Some(SchemaOrSchemas::Schema(ref schema)) => {
+                                    schema.typename(root, uri, true, map)?
+                                }
+                                Some(SchemaOrSchemas::Schemas(_)) => {
+                                    bail!("Multiple items not supported in schema {}", uri)
+                                }
+                                None => GENERIC_TYPE.into(),   // Unknown type, accept anything
+                            }
+                        };
+                        Ok(SchemaType::Array(Array { name, tags, inner }))
+                    }
+                    Object => {
+                        let required: HashSet<String> = self.required
+                            .as_ref()
+                            .map(|v| v.iter().map(|s| s.clone()).collect())
+                            .unwrap_or(HashSet::new());
+                        let fields = self.properties
+                            .as_ref()
+                            .unwrap_or(&Map::new())
+                            .iter()
+                            .map(|(name, schema)| {
+                                let required = required.contains(name);
+                                let tags = vec![];
+                                let type_ = schema.typename(root, uri, required, map)?;
+                                Ok(Field {
+                                    name: name.clone(),
+                                    type_,
+                                    tags,
+                                })
                             })
-                        })
-                        .collect::<Result<Vec<Field>>>()?;
-                    let tags = vec![];
-                    Ok(SchemaType::Struct(Struct { name, tags, fields }))
+                            .collect::<Result<Vec<Field>>>()?;
+                        let tags = vec![];
+                        Ok(SchemaType::Struct(Struct { name, tags, fields }))
+                    }
                 }
             }
         }
     }
 }
 
-fn name_from_uri(uri: &str) -> String {
-    uri.split("/").last().unwrap().into()
+fn uri_to_name<'a>(root: &'a str, uri: &'a str) -> &'a str {
+    let name = uri.split("/").last().unwrap();
+    if name == "#" { root } else { name }
 }
 
 fn gather_definitions_map(
@@ -356,24 +364,27 @@ impl RootSchema {
         Ok(map)
     }
 
-    fn renderables(&self) -> Result<Vec<SchemaType>> {
+    fn renderables(&self, root: &str) -> Result<Vec<SchemaType>> {
         let map = self.gather_definitions()?;
         map.iter()
-            .map(|(uri, schema)| schema.to_renderable(uri, &map))
+            .map(|(uri, schema)| schema.to_renderable(root, uri, &map))
             .collect()
     }
 
-    pub fn render_all(&self) -> Result<Tokens> {
-        let renderables = self.renderables()?;
+    pub fn render_all(&self, root: &str) -> Result<Tokens> {
+        let renderables = self.renderables(root)?;
         Ok(render_all(&renderables))
     }
 }
 
 fn render_all(renderables: &Vec<SchemaType>) -> Tokens {
-    renderables.iter().fold(Tokens::new(), |mut tokens, renderable| {
-        renderable.to_tokens(&mut tokens);
-        tokens
-    })
+    renderables.iter().fold(
+        Tokens::new(),
+        |mut tokens, renderable| {
+            renderable.to_tokens(&mut tokens);
+            tokens
+        },
+    )
 }
 
 fn resolve_definitions(map: &Map<Schema>) -> Vec<(&str, &Schema)> {
@@ -419,7 +430,7 @@ impl ToTokens for SchemaType {
     fn to_tokens(&self, tokens: &mut Tokens) {
         use SchemaType::*;
         match *self {
-            Primitive => {},  // No need to render a primitive
+            Primitive => {}  // No need to render a primitive
             Array(ref elem) => elem.to_tokens(tokens),
             Enum(ref elem) => elem.to_tokens(tokens),
             Struct(ref elem) => elem.to_tokens(tokens),
@@ -439,7 +450,8 @@ impl ToTokens for Struct {
         let name = &self.name;
         let fields = &self.fields;
         let tags = &self.tags;
-        let tok = quote! {
+        let tok =
+            quote! {
             #(#tags),*
             pub struct #name {
                 #(#fields),*
@@ -462,7 +474,8 @@ impl ToTokens for Field {
         let name = &self.name;
         let tags = &self.tags;
         let type_ = &self.type_;
-        let tok = quote! {
+        let tok =
+            quote! {
             #(#tags),*
             #name: #type_
         };
@@ -481,7 +494,8 @@ impl ToTokens for Enum {
         let tags = &self.tags;
         let names = self.variants.iter().map(|v| &v.0);
         let types = self.variants.iter().map(|v| &v.1);
-        let tok = quote! {
+        let tok =
+            quote! {
             #(#tags),*
             #(#names: #types),*
         };
@@ -493,7 +507,7 @@ impl ToTokens for Enum {
 pub struct Array {
     name: String,
     tags: Vec<String>,
-    inner: String
+    inner: String,
 }
 
 impl ToTokens for Array {
@@ -501,7 +515,8 @@ impl ToTokens for Array {
         let tags = &self.tags;
         let name = &self.name;
         let inner = &self.inner;
-        let tok = quote! {
+        let tok =
+            quote! {
             #(#tags),*
             type #name = Vec<#inner>;
         };
@@ -537,14 +552,13 @@ mod tests {
     #[test]
     fn test_gather_renderables() {
         let root = metaschema();
-        let renderable = root.renderables().unwrap();
-        assert_eq!(renderable.len(), 1)
+        root.renderables("root").unwrap();
     }
 
     #[test]
     fn test_render() {
         let root = metaschema();
-        let tokens = root.render_all().unwrap();
-        println!("{}", tokens)
+        let tokens = root.render_all("schema").unwrap();
+        println!("{}", tokens.as_str())
     }
 }
