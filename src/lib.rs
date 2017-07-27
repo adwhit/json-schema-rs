@@ -7,6 +7,7 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate serde_yaml;
 extern crate inflector;
+#[macro_use]
 extern crate quote;
 extern crate rustfmt;
 
@@ -15,6 +16,7 @@ use std::path::Path;
 use std::io::prelude::*;
 use std::collections::BTreeMap;
 use std::fmt;
+use quote::Tokens;
 
 use errors::*;
 
@@ -45,8 +47,8 @@ pub type StringArray = Vec<String>;
 type Map<T> = BTreeMap<String, T>;
 
 #[serde(rename = "simpleTypes")]
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-pub enum SimpleTypes {
+#[derive(Clone, Copy, PartialEq, Debug, Deserialize, Serialize)]
+pub enum SimpleType {
     #[serde(rename = "array")]
     Array,
     #[serde(rename = "boolean")]
@@ -61,6 +63,21 @@ pub enum SimpleTypes {
     Object,
     #[serde(rename = "string")]
     String,
+}
+
+impl SimpleType {
+    fn native_typename(&self) -> Option<&'static str> {
+        use SimpleType::*;
+        let name = match *self {
+            Null => "()",
+            Boolean => "bool",
+            Integer => "i64",
+            Number => "f64",
+            String => "String",
+            Object | Array => return None
+        };
+        Some(name)
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
@@ -147,7 +164,7 @@ pub struct Schema {
     pub title: Option<String>,
     #[serde(rename = "type")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub type_: Option<SimpleTypesOrSimpleTypes1>,
+    pub type_: Option<SimpleTypeOrSimpleTypes>,
     #[serde(rename = "uniqueItems")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique_items: Option<bool>,
@@ -174,12 +191,41 @@ impl Schema {
     }
 
     // TODO is this function actually necessary?
-    fn resolve<'a>(&'a self, path: &'a str, map: &'a Map<Schema>) -> Result<&'a Schema> {
+    fn resolve<'a>(&'a self, uri: &'a str, map: &'a Map<Schema>) -> Result<(&'a str, &'a Schema)> {
         if let Some(ref ref_) = self.ref_ {
-            map.get(path).ok_or_else(|| format!("Failed to resolve reference '{}'", ref_).into())
+            let deref = map
+                .get(ref_)
+                .ok_or_else(|| ErrorKind::from(format!("Failed to resolve reference '{}'", ref_)))?;
+            deref.resolve(ref_, map)
         } else {
-            Ok(&self)
+            Ok((uri, &self))
         }
+    }
+
+    fn typename(&self, uri: &str, map: &Map<Schema>) -> Result<String> {
+        // assume it is already validated
+        let (realuri, realschema) = self.resolve(uri, map)?;
+        Ok(realschema.typename_(realuri))
+    }
+
+    fn typename_(&self, uri: &str) -> String {
+        self.type_
+            .as_ref()
+            .and_then(|type_or_vec| match *type_or_vec {
+                SimpleTypeOrSimpleTypes::SimpleType(st) => st.native_typename(),
+                _ => None  // We will need an enum
+            })
+            .map(|name| name.into())
+            .unwrap_or("JsonValue".into())
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn render(&self, name: &str) -> Tokens {
+        quote!({
+        })
     }
 
 }
@@ -224,7 +270,7 @@ fn gather_definitions_vec(maybe_schma_vec: &Option<SchemaArray>, path: String, s
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
-struct RootSchema(Schema);
+pub struct RootSchema(Schema);
 
 impl RootSchema {
     pub fn from_reader_yaml<R: Read>(reader: R) -> Result<RootSchema> {
@@ -255,7 +301,7 @@ impl RootSchema {
 fn resolve_definitions(map: &Map<Schema>) -> Vec<(&str, &Schema)> {
     // delivers the list of schemas we actually need to create
     map.iter()
-        .filter(|&(uri, schema)| schema.ref_.is_none())
+        .filter(|&(_uri, schema)| schema.ref_.is_none())
         .map(|(uri, schema)| (uri.as_str(), schema))
         .collect()
 }
@@ -271,9 +317,9 @@ pub enum SchemaOrSchemas {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum SimpleTypesOrSimpleTypes1 {
-    SimpleTypes(SimpleTypes),
-    SimpleTypes1(Vec<SimpleTypes>)
+pub enum SimpleTypeOrSimpleTypes {
+    SimpleType(SimpleType),
+    SimpleTypes(Vec<SimpleType>)
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
