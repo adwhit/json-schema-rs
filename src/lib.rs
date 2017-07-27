@@ -30,14 +30,8 @@ mod errors {
     }
 }
 
-static RUST_KEYWORDS: &'static [&'static str] = &[
-    "as", "break", "crate", "else", "enum", "extern", "false", "fn", "for",
-    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
-    "ref", "return", "static", "self", "Self", "struct", "super", "true", "trait",
-    "type", "unsafe", "use", "while", "continue", "box", "const", "where", "virtual",
-    "proc", "alignof", "become", "offsetof", "priv", "pure", "sizeof", "typeof",
-    "unsized", "yield", "do", "abstract", "final", "override"
-];
+// TODO: lazy-static this
+mod keywords;
 
 pub type PositiveInteger = i64;
 pub type PositiveIntegerDefault0 = serde_json::Value;
@@ -74,9 +68,17 @@ impl SimpleType {
             Integer => "i64",
             Number => "f64",
             String => "String",
-            Object | Array => return None
+            Object | Array => return None,
         };
         Some(name)
+    }
+
+    fn is_primitive(&self) -> bool {
+        use SimpleType::*;
+        match *self {
+            Object | Array => false,
+            _ => true,
+        }
     }
 }
 
@@ -180,22 +182,39 @@ impl fmt::Display for Schema {
 impl Schema {
     /// find every instance in which a schema is defined or referenced
     pub fn gather_definitions(&self, path: String, schema_map: &mut Map<Schema>) -> Result<()> {
-        gather_definitions_map(&self.definitions, format!("{}/definitions", path), schema_map)?;
+        let exists = schema_map.insert(path.clone(), self.clone());
+        if exists.is_some() {
+            bail!("Schema already exists at location {}", path)
+        };
+        gather_definitions_map(
+            &self.definitions,
+            format!("{}/definitions", path),
+            schema_map,
+        )?;
         gather_definitions_map(&self.properties, format!("{}/properties", path), schema_map)?;
-        gather_definitions_map(&self.pattern_properties, format!("{}/patternProperties", path), schema_map)?;
+        gather_definitions_map(
+            &self.pattern_properties,
+            format!("{}/patternProperties", path),
+            schema_map,
+        )?;
         gather_definitions_vec(&self.all_of, format!("{}/allOf", path), schema_map)?;
         gather_definitions_vec(&self.any_of, format!("{}/anyOf", path), schema_map)?;
         gather_definitions_vec(&self.one_of, format!("{}/oneOf", path), schema_map)?;
-        gather_definitions_box(&self.not, format!("{}/not", path), schema_map)?;
+        if let Some(ref schema) = self.not {
+            schema.gather_definitions(
+                format!("{}/not", path),
+                schema_map,
+            )?
+        }
         Ok(())
     }
 
     // TODO is this function actually necessary?
     fn resolve<'a>(&'a self, uri: &'a str, map: &'a Map<Schema>) -> Result<(&'a str, &'a Schema)> {
         if let Some(ref ref_) = self.ref_ {
-            let deref = map
-                .get(ref_)
-                .ok_or_else(|| ErrorKind::from(format!("Failed to resolve reference '{}'", ref_)))?;
+            let deref = map.get(ref_).ok_or_else(|| {
+                ErrorKind::from(format!("Failed to resolve reference '{}'", ref_))
+            })?;
             deref.resolve(ref_, map)
         } else {
             Ok((uri, &self))
@@ -213,24 +232,60 @@ impl Schema {
             .as_ref()
             .and_then(|type_or_vec| match *type_or_vec {
                 SimpleTypeOrSimpleTypes::SimpleType(st) => st.native_typename(),
-                _ => None  // We will need an enum
+                _ => None,  // We will need an enum
             })
             .map(|name| name.into())
             .unwrap_or("JsonValue".into())
     }
 
+    fn is_primitive(&self) -> bool {
+        self.type_
+            .as_ref()
+            .map(|type_or_vec| match *type_or_vec {
+                SimpleTypeOrSimpleTypes::SimpleType(st) => true,
+                _ => false,
+            })
+            .unwrap_or(false)
+    }
+
     fn validate(&self) -> Result<()> {
-        Ok(())
+        // TODO validation
+        unimplemented!()
     }
 
-    fn render(&self, name: &str) -> Tokens {
-        quote!({
-        })
-    }
 
+    fn renderable(&self, uri: &str, map: &Map<Schema>) -> Result<SchemaType> {
+        if self.is_primitive() {
+            return Ok(SchemaType::Primitive);
+        }
+        if self.properties.is_none() {
+            return Ok(SchemaType::Primitive);
+        }
+        let tags = vec![];
+        let fields = self.properties
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(name, schema)| {
+                let tags = vec![];
+                let type_ = schema.typename(uri, map)?;
+                Ok(Field {
+                    name: name.clone(),
+                    type_,
+                    tags,
+                })
+            })
+            .collect::<Result<Vec<Field>>>()?;
+        let name = uri.into(); // TODO
+        Ok(SchemaType::Struct(Struct { name, tags, fields }))
+    }
 }
 
-fn gather_definitions_box(maybe_schma: &Option<Box<Schema>>, path: String, schema_map: &mut Map<Schema>) -> Result<()> {
+fn gather_definitions_box(
+    maybe_schma: &Option<Box<Schema>>,
+    path: String,
+    schema_map: &mut Map<Schema>,
+) -> Result<()> {
     if let Some(ref schema) = *maybe_schma {
         let previous = schema_map.insert(path.clone(), *schema.clone());
         if previous.is_some() {
@@ -241,29 +296,29 @@ fn gather_definitions_box(maybe_schma: &Option<Box<Schema>>, path: String, schem
     Ok(())
 }
 
-fn gather_definitions_map(maybe_schma_map: &Option<Map<Schema>>, path: String, schema_map: &mut Map<Schema>) -> Result<()> {
+fn gather_definitions_map(
+    maybe_schma_map: &Option<Map<Schema>>,
+    path: String,
+    schema_map: &mut Map<Schema>,
+) -> Result<()> {
     if let Some(ref map) = *maybe_schma_map {
         for (name, schema) in map {
-            let current_path = format!("{}/{}", path, name);
-            let previous = schema_map.insert(current_path.clone(), schema.clone());
-            if previous.is_some() {
-                bail!("Schema already exists at location {}", current_path)
-            };
-            schema.gather_definitions(current_path, schema_map)?;
+            let next_path = format!("{}/{}", path, name);
+            schema.gather_definitions(next_path, schema_map)?;
         }
     }
     Ok(())
 }
 
-fn gather_definitions_vec(maybe_schma_vec: &Option<SchemaArray>, path: String, schema_map: &mut Map<Schema>) -> Result<()> {
+fn gather_definitions_vec(
+    maybe_schma_vec: &Option<SchemaArray>,
+    path: String,
+    schema_map: &mut Map<Schema>,
+) -> Result<()> {
     if let Some(ref schemas) = *maybe_schma_vec {
         for (ix, schema) in schemas.iter().enumerate() {
-            let current_path = format!("{}/{}", path, ix);
-            let previous = schema_map.insert(current_path.clone(), schema.clone());
-            if previous.is_some() {
-                bail!("Schema already exists at location {}", current_path)
-            };
-            schema.gather_definitions(current_path, schema_map)?;
+            let next_path = format!("{}/{}", path, ix);
+            schema.gather_definitions(next_path, schema_map)?;
         }
     }
     Ok(())
@@ -296,6 +351,15 @@ impl RootSchema {
         self.0.gather_definitions("#".into(), &mut map)?;
         Ok(map)
     }
+
+    fn renderables(&self) -> Result<Vec<Struct>> {
+        let map = self.gather_definitions()?;
+        // map
+        //     .iter()
+        //     .map(|(uri, schema)| schema.renderable(uri, map))
+        unimplemented!()
+
+    }
 }
 
 fn resolve_definitions(map: &Map<Schema>) -> Vec<(&str, &Schema)> {
@@ -312,41 +376,72 @@ type Schemas = Vec<Schema>;
 #[serde(untagged)]
 pub enum SchemaOrSchemas {
     Schema(Box<Schema>),
-    Schemas(Schemas)
+    Schemas(Schemas),
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SimpleTypeOrSimpleTypes {
     SimpleType(SimpleType),
-    SimpleTypes(Vec<SimpleType>)
+    SimpleTypes(Vec<SimpleType>),
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum BoolOrSchema {
     Bool(bool),
-    Schema(Box<Schema>)
+    Schema(Box<Schema>),
 }
 
-enum StructName {
-    Named(String),
-    Anonymous
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+enum SchemaType {
+    Primitive,
+    Array,
+    Enum(Enum),
+    Struct(Struct),
 }
 
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Struct {
-    name: StructName,
-    tags: Vec<String>,
-    fields: Vec<Field>
-}
-
-pub struct Field {
     name: String,
     tags: Vec<String>,
+    fields: Vec<Field>,
 }
 
-struct UntaggedEnumWrapper {
-    variants: Vec<String>
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+pub struct Field {
+    name: String,
+    type_: String,
+    tags: Vec<String>,
+}
+
+
+
+impl Struct {
+    fn render(&self) -> Tokens {
+        let fields = self.fields.iter().map(|f| f.render());
+        quote! {
+            #(self.tags),*
+            pub struct #(self.name) {
+                #(fields),*
+
+            }
+        }
+    }
+}
+
+impl Field {
+    fn render(&self) -> Tokens {
+        quote! {
+            #(tags),*
+            #(self.name): #(self.type_)
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+struct Enum {
+    variants: Vec<String>,
 }
 
 
@@ -360,7 +455,7 @@ mod tests {
 
     #[test]
     fn load_openapi3_schema() {
-         RootSchema::from_file_yaml("test_schemas/openapi3-schema.yaml").unwrap();
+        RootSchema::from_file_yaml("test_schemas/openapi3-schema.yaml").unwrap();
     }
 
     #[test]
@@ -372,8 +467,13 @@ mod tests {
     fn gather_schemas() {
         let root = metaschema();
         let map = root.gather_definitions().unwrap();
-        for (e, s) in map {
-            println!("{}: {}", e, s)
-        }
+        assert_eq!(map.len(), 47)
+    }
+
+    #[test]
+    fn gather_renderables() {
+        let root = metaschema();
+        let map = root.gather_definitions().unwrap();
+        assert_eq!(map.len(), 47)
     }
 }
