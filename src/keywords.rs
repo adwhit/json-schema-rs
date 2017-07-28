@@ -1,4 +1,4 @@
-static RUST_KEYWORDS: &'static [&'static str] = &[
+pub(crate) static RUST_KEYWORDS: &'static [&'static str] = &[
     "as",
     "break",
     "crate",

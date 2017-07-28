@@ -9,13 +9,17 @@ extern crate inflector;
 #[macro_use]
 extern crate quote;
 extern crate rustfmt;
+#[macro_use]
+extern crate lazy_static;
 
 use std::fs::File;
 use std::path::Path;
 use std::io::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+
 use quote::{Tokens, ToTokens, Ident};
+use inflector::Inflector;
 
 use errors::*;
 
@@ -25,12 +29,18 @@ mod errors {
             Io(::std::io::Error);
             Json(::serde_json::Error);
             Yaml(::serde_yaml::Error);
+            Utf8(::std::string::FromUtf8Error);
         }
     }
 }
 
-// TODO: lazy-static this
 mod keywords;
+
+lazy_static! {
+    static ref RUST_KEYWORDS: HashSet<&'static str> = {
+        keywords::RUST_KEYWORDS.iter().map(|v| *v).collect()
+    };
+}
 
 const GENERIC_TYPE: &str = "serde_json::Value";
 
@@ -287,15 +297,11 @@ impl Schema {
                                 let is_required = required_keys.contains(name);
                                 let tags = vec![];
                                 let type_ = schema.typename(root, uri, is_required, map)?;
-                                Ok(Field {
-                                    name: name.clone(),
-                                    type_,
-                                    tags,
-                                })
+                                Ok(Field::new(name.clone(), type_, tags)?)
                             })
                             .collect::<Result<Vec<Field>>>()?;
                         let tags = vec![];
-                        Ok(SchemaType::Struct(Struct { name, tags, fields }))
+                        Ok(SchemaType::Struct(Struct::new(name, tags, fields)?))
                     }
                 }
             }
@@ -372,9 +378,14 @@ impl RootSchema {
             .collect()
     }
 
-    pub fn render_all(&self, root: &str) -> Result<Tokens> {
+    fn render_all(&self, root: &str) -> Result<Tokens> {
         let renderables = self.renderables(root)?;
         Ok(render_all(&renderables))
+    }
+
+    pub fn generate(&self, root: &str) -> Result<String> {
+        let tokens = self.render_all(root)?;
+        beautify(tokens)
     }
 }
 
@@ -419,7 +430,7 @@ pub enum BoolOrSchema {
     Schema(Box<Schema>),
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug)]
 enum SchemaType {
     Primitive,
     Array(Array),
@@ -439,11 +450,51 @@ impl ToTokens for SchemaType {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+fn make_valid_identifier(s: String) -> Result<String> {
+    // bit ugly to reallocate but simple, at least
+    // TODO use unicode XID_start/XID_continue
+    let mut out = String::new();
+    let mut is_leading_char = true;
+    for c in s.chars() {
+        if is_leading_char {
+            match c {
+                'A'...'Z' | 'a'...'z' | '_' => {
+                    is_leading_char = false;
+                    out.push(c);
+                }
+                _ => ()
+            }
+        } else {
+            match c {
+                'A'...'Z' | 'a'...'z' | '_' | '0'...'9' => out.push(c),
+                _ => ()
+            }
+        }
+    }
+    if RUST_KEYWORDS.contains(&*out) {
+        out.push('_')
+    };
+    if out.len() == 0 || out == "_" {
+        bail!("could not generate valid identifier from {}", s)
+    }
+    Ok(s)
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub struct Struct {
     name: String,
-    tags: Vec<String>,
+    tags: Vec<Tokens>,
     fields: Vec<Field>,
+}
+
+impl Struct {
+    fn new(name: String, mut tags: Vec<Tokens>, fields: Vec<Field>) -> Result<Struct> {
+        let name = make_valid_identifier(name.to_pascal_case())?;
+        tags.push(quote! {
+            #[derive(Debug, Clone, Default, PartialEq)]
+        });
+        Ok(Struct { name, tags, fields })
+    }
 }
 
 impl ToTokens for Struct {
@@ -463,11 +514,23 @@ impl ToTokens for Struct {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-pub struct Field {
+#[derive(Clone, PartialEq, Debug)]
+struct Field {
     name: String,
     type_: String,
-    tags: Vec<String>,
+    tags: Vec<Tokens>,
+}
+
+impl Field {
+    fn new(name: String, type_: String, mut tags: Vec<Tokens>) -> Result<Field> {
+        let snake = make_valid_identifier(name.to_snake_case())?;
+        if name != snake {
+            tags.push(quote!{
+                #[serde(rename = #name)]
+            })
+        }
+        Ok(Field { name: snake, type_, tags })
+    }
 }
 
 impl ToTokens for Field {
@@ -529,6 +592,18 @@ impl ToTokens for Array {
     }
 }
 
+fn beautify(t: Tokens) -> Result<String> {
+    use rustfmt::*;
+    let mut buf = Vec::new();
+    let config: config::Config = Default::default();
+    let input = Input::Text(t.into_string());
+    match format_input(input, &config, Some(&mut buf)) {
+        Ok((_summmary, _filemap, _report)) => {},
+        Err((e, _summary)) => Err(e)?
+    }
+    Ok(String::from_utf8(buf)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,9 +636,9 @@ mod tests {
     }
 
     #[test]
-    fn test_render() {
+    fn test_generate() {
         let root = metaschema();
-        let tokens = root.render_all("schema").unwrap();
-        println!("{}", tokens.into_string())
+        let code = root.generate("root").unwrap();
+        println!("{}", code)
     }
 }
