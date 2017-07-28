@@ -261,7 +261,6 @@ impl Schema {
 
     fn to_renderable(&self, root: &str, uri: &str, map: &Map<Schema>) -> Result<SchemaType> {
         use SimpleType::{Object, Boolean, Null, Integer, Number};
-        let name = uri_to_name(root, uri).to_string();
         let default = SimpleTypeOrSimpleTypes::SimpleType(Object);
         match *self.type_.as_ref().unwrap_or(&default) {
             SimpleTypeOrSimpleTypes::SimpleTypes(_) => bail!("Multiple types not supported"),
@@ -283,30 +282,44 @@ impl Schema {
                                 None => GENERIC_TYPE.into(),   // Unknown type, accept anything
                             }
                         };
+                        let name = uri_to_name(root, uri).to_string();
                         Ok(SchemaType::Array(Array { name, tags, inner }))
                     }
-                    Object => {
-                        let required_keys: HashSet<String> = self.required
-                            .as_ref()
-                            .map(|v| v.iter().map(|s| s.clone()).collect())
-                            .unwrap_or(HashSet::new());
-                        let fields = self.properties
-                            .as_ref()
-                            .unwrap_or(&Map::new())
-                            .iter()
-                            .map(|(name, schema)| {
-                                let is_required = required_keys.contains(name);
-                                let tags = vec![];
-                                let type_ = schema.typename(root, uri, is_required, map)?;
-                                Ok(Field::new(name.clone(), type_, tags)?)
-                            })
-                            .collect::<Result<Vec<Field>>>()?;
-                        let tags = vec![];
-                        Ok(SchemaType::Struct(Struct::new(name, tags, fields)?))
-                    }
+                    Object => self.renderable_object(root, uri, map)
                 }
             }
         }
+    }
+
+    fn renderable_object(&self, root: &str, uri: &str, map: &Map<Schema>) -> Result<SchemaType> {
+        let name = uri_to_name(root, uri).to_string();
+
+        if let Some(anyarr) = self.any_of.as_ref() {
+            // we are going to make an enum
+            let variants : Result<Vec<_>> = anyarr.iter().enumerate().map(|(ix, any)| {
+                let uri = format!("{}/anyOf/{}", uri, ix);
+                Ok(any.typename(root, &uri, true, map)?)
+            }).collect();
+            return Ok(SchemaType::Enum(Enum::new(name, vec![], variants?)?))
+        }
+
+        let required_keys: HashSet<String> = self.required
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.clone()).collect())
+            .unwrap_or(HashSet::new());
+        let fields = self.properties
+            .as_ref()
+            .unwrap_or(&Map::new())
+            .iter()
+            .map(|(name, schema)| {
+                let is_required = required_keys.contains(name);
+                let tags = vec![];
+                let type_ = schema.typename(root, uri, is_required, map)?;
+                Ok(Field::new(name.clone(), type_, tags)?)
+            })
+            .collect::<Result<Vec<Field>>>()?;
+        let tags = vec![];
+        Ok(SchemaType::Struct(Struct::new(name, tags, fields)?))
     }
 }
 
@@ -562,24 +575,35 @@ impl ToTokens for Field {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug)]
 struct Enum {
     name: String,
-    tags: Vec<String>,
+    tags: Vec<Tokens>,
     variants: Vec<(String, String)>,
+}
+
+impl Enum {
+    fn new(name: String, tags: Vec<Tokens>, variants: Vec<String>) -> Result<Enum> {
+        let name = make_valid_identifier(name.to_pascal_case())?;
+        let variants = variants.into_iter().map(|v| {
+            let valid = make_valid_identifier(v)?;
+            Ok((valid.clone(), valid))
+        }).collect::<Result<Vec<_>>>()?;
+        Ok(Enum { name, tags, variants })
+    }
 }
 
 impl ToTokens for Enum {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        let name = &self.name;
+        let name = Ident::new(&*self.name);
         let tags = &self.tags;
-        let names = self.variants.iter().map(|v| &v.0);
-        let types = self.variants.iter().map(|v| &v.1);
+        let names = self.variants.iter().map(|v| Ident::new(&*v.0));
+        let types = self.variants.iter().map(|v| Ident::new(&*v.1));
         let tok =
             quote! {
             #(#tags),*
             pub enum #name {
-                #(#names: #types),*
+                #(#names(#types)),*
             }
         };
         tokens.append(tok);
@@ -609,14 +633,26 @@ impl ToTokens for Array {
 
 fn beautify(t: Tokens) -> Result<String> {
     use rustfmt::*;
-    let mut buf = Vec::new();
-    let config: config::Config = Default::default();
-    let input = Input::Text(t.into_string());
-    match format_input(input, &config, Some(&mut buf)) {
+
+    // FIXME workaround is necessary until rustfmt works programmatically
+    let tmppath = "/tmp/rustfmt.rs";  // TODO use tempdir
+    {
+        let mut tmp = File::create(tmppath)?;
+        tmp.write_all(t.as_str().as_bytes())?;
+    }
+
+    let input = Input::File(tmppath.into());
+    let mut fakebuf = Vec::new();  // pretty weird that this is necessary.. but it is
+
+    match format_input(input, &Default::default(), Some(&mut fakebuf)) {
         Ok((_summmary, _filemap, _report)) => {}
         Err((e, _summary)) => Err(e)?,
     }
-    Ok(String::from_utf8(buf)?)
+
+    let mut tmp = File::open(tmppath)?;
+    let mut buf = String::new();
+    tmp.read_to_string(&mut buf)?;
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -673,6 +709,8 @@ mod tests {
         assert!(make_valid_identifier(id6).is_err());
         let id7 = "type".into();
         assert_eq!(make_valid_identifier(id7).unwrap(), "type_");
+        let id8 = "this 123".into();
+        assert_eq!(make_valid_identifier(id8).unwrap(), "this123");
     }
 
     #[test]
