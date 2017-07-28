@@ -1,0 +1,10 @@
+properties:
+  prop1:
+    type: integer
+  prop2:
+    $ref: "#/definitions/IntWrapper"
+
+definitions:
+  IntWrapper:
+    type: integer
+
