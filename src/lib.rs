@@ -6,6 +6,7 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate serde_yaml;
 extern crate inflector;
+extern crate regex;
 #[macro_use]
 extern crate quote;
 extern crate rustfmt;
@@ -241,7 +242,7 @@ impl Schema {
                     _ => None,  // We will need an enum
                 })
                 .map(|name| name.into())
-                .unwrap_or(uri_to_name(root, uri).to_string());
+                .unwrap_or(uri_to_name(root, uri));
             if required {
                 type_
             } else {
@@ -309,11 +310,6 @@ impl Schema {
     }
 }
 
-fn uri_to_name<'a>(root: &'a str, uri: &'a str) -> &'a str {
-    let name = uri.split("/").last().unwrap();
-    if name == "#" { root } else { name }
-}
-
 fn gather_definitions_map(
     maybe_schma_map: &Option<Map<Schema>>,
     path: String,
@@ -373,7 +369,8 @@ impl RootSchema {
     fn renderables(&self, root: &str) -> Result<Vec<SchemaType>> {
         let map = self.gather_definitions()?;
         let defns = resolve_definitions(&map);
-        defns.iter()
+        defns
+            .iter()
             .map(|&(uri, schema)| schema.to_renderable(root, uri, &map))
             .collect()
     }
@@ -450,8 +447,22 @@ impl ToTokens for SchemaType {
     }
 }
 
+fn uri_to_name<'a>(root: &'a str, uri: &'a str) -> String {
+    let rx = regex::Regex::new("^#").unwrap();
+    let uri = rx.replace(uri, root);
+    let name = uri.split("/").last().unwrap();
+    match name.parse::<i32>() {
+        // it was an array index (i.e. anonymous).
+        // so just return the whole uri and do name mangling later
+        // TODO where else might anonymous types occur?
+        Ok(_) => uri.replace('/', " ").to_pascal_case(),
+        _ => name.to_pascal_case(),
+    }
+}
+
 fn make_valid_identifier(s: String) -> Result<String> {
-    // bit ugly to reallocate but simple, at least
+    // strip out invalid characters and ensure result is valid
+    // bit ugly to reallocate but at least it is simple
     // TODO use unicode XID_start/XID_continue
     let mut out = String::new();
     let mut is_leading_char = true;
@@ -462,12 +473,12 @@ fn make_valid_identifier(s: String) -> Result<String> {
                     is_leading_char = false;
                     out.push(c);
                 }
-                _ => ()
+                _ => (),
             }
         } else {
             match c {
                 'A'...'Z' | 'a'...'z' | '_' | '0'...'9' => out.push(c),
-                _ => ()
+                _ => (),
             }
         }
     }
@@ -477,7 +488,7 @@ fn make_valid_identifier(s: String) -> Result<String> {
     if out.len() == 0 || out == "_" {
         bail!("could not generate valid identifier from {}", s)
     }
-    Ok(s)
+    Ok(out)
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -529,7 +540,11 @@ impl Field {
                 #[serde(rename = #name)]
             })
         }
-        Ok(Field { name: snake, type_, tags })
+        Ok(Field {
+            name: snake,
+            type_,
+            tags,
+        })
     }
 }
 
@@ -598,8 +613,8 @@ fn beautify(t: Tokens) -> Result<String> {
     let config: config::Config = Default::default();
     let input = Input::Text(t.into_string());
     match format_input(input, &config, Some(&mut buf)) {
-        Ok((_summmary, _filemap, _report)) => {},
-        Err((e, _summary)) => Err(e)?
+        Ok((_summmary, _filemap, _report)) => {}
+        Err((e, _summary)) => Err(e)?,
     }
     Ok(String::from_utf8(buf)?)
 }
@@ -640,5 +655,31 @@ mod tests {
         let root = metaschema();
         let code = root.generate("root").unwrap();
         println!("{}", code)
+    }
+
+    #[test]
+    fn test_make_valid_identifier() {
+        let id1 = "1234_abcd".into();
+        assert_eq!(make_valid_identifier(id1).unwrap(), "_abcd");
+        let id2 = "$1234Abcd".into();
+        assert_eq!(make_valid_identifier(id2).unwrap(), "Abcd");
+        let id3 = "$@1234\\|./".into();
+        assert!(make_valid_identifier(id3).is_err());
+        let id4 = "1234_".into();
+        assert!(make_valid_identifier(id4).is_err());
+        let id5 = "".into();
+        assert!(make_valid_identifier(id5).is_err());
+        let id6 = "_".into();
+        assert!(make_valid_identifier(id6).is_err());
+        let id7 = "type".into();
+        assert_eq!(make_valid_identifier(id7).unwrap(), "type_");
+    }
+
+    #[test]
+    fn test_uri_to_name() {
+        let id1 = "#/this/is/some/route/my type".into();
+        assert_eq!(uri_to_name("root", id1), "MyType");
+        let id2 = "#/some/other/route/1".into();
+        assert_eq!(uri_to_name("root", id2), "RootSomeOtherRoute1");
     }
 }
