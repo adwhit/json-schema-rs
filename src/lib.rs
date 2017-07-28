@@ -53,7 +53,7 @@ pub type StringArray = Vec<String>;
 type Map<T> = BTreeMap<String, T>;
 
 #[serde(rename = "simpleTypes")]
-#[derive(Clone, Copy, PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Serialize, Hash)]
 pub enum SimpleType {
     #[serde(rename = "array")]
     Array,
@@ -219,7 +219,6 @@ impl Schema {
         Ok(())
     }
 
-    // TODO is this function actually necessary?
     fn resolve<'a>(&'a self, uri: &'a str, map: &'a Map<Schema>) -> Result<(&'a str, &'a Schema)> {
         if let Some(ref ref_) = self.ref_ {
             let deref = map.get(ref_).ok_or_else(|| {
@@ -261,33 +260,28 @@ impl Schema {
 
     fn to_renderable(&self, root: &str, uri: &str, map: &Map<Schema>) -> Result<SchemaType> {
         use SimpleType::{Object, Boolean, Null, Integer, Number};
-        let default = SimpleTypeOrSimpleTypes::SimpleType(Object);
-        match *self.type_.as_ref().unwrap_or(&default) {
-            SimpleTypeOrSimpleTypes::SimpleTypes(_) => bail!("Multiple types not supported"),
-            SimpleTypeOrSimpleTypes::SimpleType(st) => {
-                match st {
-                    Boolean | Integer | Null | Number | SimpleType::String => Ok(
-                        SchemaType::Primitive,
-                    ),
-                    SimpleType::Array => {
-                        let tags = vec![];
-                        let inner = {
-                            match self.items {
-                                Some(SchemaOrSchemas::Schema(ref schema)) => {
-                                    schema.typename(root, uri, true, map)?
-                                }
-                                Some(SchemaOrSchemas::Schemas(_)) => {
-                                    bail!("Multiple items not supported in schema {}", uri)
-                                }
-                                None => GENERIC_TYPE.into(),   // Unknown type, accept anything
-                            }
-                        };
-                        let name = uri_to_name(root, uri).to_string();
-                        Ok(SchemaType::Array(Array { name, tags, inner }))
+        let type_ = self.type_.as_ref().map(|t| t.unwrap_or_bail()).unwrap_or(Ok(Object))?;
+        match type_ {
+            Boolean | Integer | Null | Number | SimpleType::String => Ok(
+                SchemaType::Primitive,
+            ),
+            SimpleType::Array => {
+                let tags = vec![];
+                let inner = {
+                    match self.items {
+                        Some(SchemaOrSchemas::Schema(ref schema)) => {
+                            schema.typename(root, uri, true, map)?
+                        }
+                        Some(SchemaOrSchemas::Schemas(_)) => {
+                            bail!("Multiple items not supported in schema {}", uri)
+                        }
+                        None => GENERIC_TYPE.into(),   // Unknown type, accept anything
                     }
-                    Object => self.renderable_object(root, uri, map)
-                }
+                };
+                let name = uri_to_name(root, uri).to_string();
+                Ok(SchemaType::Array(Array { name, tags, inner }))
             }
+            Object => self.renderable_object(root, uri, map)
         }
     }
 
@@ -301,6 +295,11 @@ impl Schema {
                 Ok(any.typename(root, &uri, true, map)?)
             }).collect();
             return Ok(SchemaType::Enum(Enum::new(name, vec![], variants?)?))
+        }
+
+        if let Some(allarr) = self.all_of.as_ref() {
+            let merged_schema = merge_schemas(allarr, map)?;
+            return merged_schema.to_renderable(root, &uri, map)
         }
 
         let required_keys: HashSet<String> = self.required
@@ -321,6 +320,37 @@ impl Schema {
         let tags = vec![];
         Ok(SchemaType::Struct(Struct::new(name, tags, fields)?))
     }
+}
+
+fn merge_schemas(schemas: &Vec<Schema>, map: &Map<Schema>) -> Result<Schema> {
+    let mut all_props = Map::<Schema>::new();
+    let mut types = Vec::new();
+    let _: () = schemas.iter().map(|schema| {
+        let (_, real_schema) = schema.resolve("dummy", map)?;
+        real_schema.properties.as_ref().map(|map| {
+            map.iter().map(|(name, propschema)| {
+                if let Some(ref type_) = propschema.type_ {
+                    types.push(type_.unwrap_or_bail()?)
+                };
+                match all_props.insert(name.clone(), propschema.clone()) {
+                    Some(_) => bail!("Duplicate key found: {}", name),
+                    None => Ok(())
+                }
+            }).collect::<Result<Vec<_>>>().map(|_| ())
+        }).unwrap_or(Ok(()))
+    }).collect::<Result<Vec<()>>>().map(|_| ())?;
+    let mut newschema: Schema = Default::default();
+    let type_ = {
+        let dedup: HashSet<SimpleType> = types.iter().map(|v| *v).collect();
+        match dedup.len() {
+            0 => SimpleType::Object,
+            1 => *types.first().unwrap(),
+            _ => bail!("Inconsistent types for allOf: {:?}", types)
+        }
+    };
+    newschema.type_ = Some(SimpleTypeOrSimpleTypes::SimpleType(type_));
+    newschema.properties = Some(all_props);
+    Ok(newschema)
 }
 
 fn gather_definitions_map(
@@ -431,6 +461,15 @@ pub enum SchemaOrSchemas {
 pub enum SimpleTypeOrSimpleTypes {
     SimpleType(SimpleType),
     SimpleTypes(Vec<SimpleType>),
+}
+
+impl SimpleTypeOrSimpleTypes {
+    fn unwrap_or_bail(&self) -> Result<SimpleType> {
+        match *self {
+            SimpleTypeOrSimpleTypes::SimpleType(st) => Ok(st),
+            _ => bail!("Multiple types not supported"),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -597,7 +636,7 @@ impl ToTokens for Enum {
     fn to_tokens(&self, tokens: &mut Tokens) {
         let name = Ident::new(&*self.name);
         let tags = &self.tags;
-        let names = self.variants.iter().map(|v| Ident::new(&*v.0));
+        let names = self.variants.iter().map(|v| Ident::new(&*v.0.to_pascal_case()));
         let types = self.variants.iter().map(|v| Ident::new(&*v.1));
         let tok =
             quote! {
@@ -661,6 +700,7 @@ mod tests {
 
     fn metaschema() -> RootSchema {
         RootSchema::from_file_json("test_schemas/metaschema-draft4.json").unwrap()
+        //RootSchema::from_file_yaml("test_schemas/openapi3-schema.yaml").unwrap()
     }
 
     #[test]
