@@ -208,13 +208,15 @@ impl Uri {
         Uri(format!("{}/{}", self, next))
     }
 
-    fn to_name(&self) -> String {
-        let name = self.0.split("/").last().unwrap();
+    fn to_name(&self, root: &str) -> String {
+        let rx = regex::Regex::new("^#/").unwrap();
+        let uri = rx.replace(&self.0, format!("{}/", root).as_str());
+        let name = uri.split("/").last().unwrap();
         match name.parse::<i32>() {
             // it was an array index (i.e. anonymous).
             // so just return the whole uri and do name mangling later
             // TODO where else might anonymous types occur?
-            Ok(_) => self.0.replace('/', " ").to_pascal_case(),
+            Ok(_) => uri.replace('/', " ").to_pascal_case(),
             _ => name.to_pascal_case(),
         }
     }
@@ -258,13 +260,13 @@ impl Schema {
         gather_definitions_vec(&self.one_of, uri.join("oneOf"), schema_map)?;
         if let Some(ref schema) = self.not {
             schema.gather_definitions(
-                &uri.join("/not"),
+                &uri.join("not"),
                 schema_map,
             )?
         }
         if let Some(SchemaOrSchemas::Schema(ref schema)) = self.items {
             schema.gather_definitions(
-                &uri.join("/items"),
+                &uri.join("items"),
                 schema_map,
             )?
         }
@@ -280,6 +282,8 @@ impl Schema {
         } else if self.any_of.is_some() {
             Ok(SchemaType::AnyOf)
         } else if self.one_of.is_some() {
+            Ok(SchemaType::OneOf)
+        } else if self.all_of.is_some() {
             Ok(SchemaType::AllOf)
         } else if let Some(ref st) = self.type_ {
             let st = st.unwrap_or_bail()?;
@@ -377,9 +381,7 @@ impl RootSchema {
     pub fn from_file_json<P: AsRef<Path>>(path: P) -> Result<RootSchema> {
         RootSchema::from_reader_json(File::open(path)?)
     }
-}
 
-impl RootSchema {
     fn gather_definitions(&self) -> Result<SchemaMap> {
         let mut map = SchemaMap::new();
         self.0.gather_definitions(&"#".into(), &mut map)?;
@@ -395,13 +397,9 @@ impl RootSchema {
             .collect()
     }
 
-    fn render_all(&self, root: &str) -> Result<Tokens> {
-        let renderables = self.renderables(root)?;
-        Ok(render_all(&renderables))
-    }
-
     pub fn generate(&self, root: &str) -> Result<String> {
-        let tokens = self.render_all(root)?;
+        let renderables = self.renderables(root)?;
+        let tokens = render_all(&renderables);
         beautify(tokens)
     }
 }
@@ -426,7 +424,7 @@ fn collect_renderable_definitions(map: &SchemaMap) -> Vec<&MetaSchema> {
                 use SchemaType::*;
                 match metaschema.schema_type {
                     Reference(_) | Primitive(_) | Array | Untyped => false,
-                    Enum | AnyOf | AllOf | Object => true
+                    Enum | AnyOf | AllOf | OneOf | Object => true
                 }
             }
         })
@@ -442,6 +440,7 @@ enum SchemaType {
     Enum,
     AllOf,
     AnyOf,
+    OneOf,
     Object,
     Untyped,
 }
@@ -458,92 +457,84 @@ impl MetaSchema {
         Ok(MetaSchema{uri, schema_type, schema})
     }
 
-    fn typename(&self, required: bool, map: &SchemaMap) -> Result<(String, Vec<Modifier>)> {
+    fn typename(&self, root: &str, required: bool, map: &SchemaMap) -> Result<TypeName> {
         use SchemaType::*;
         let mods = if !required { vec![Modifier::Option] } else { vec![] };
         match self.schema_type {
             Reference(ref uri) => map.get(uri)
                 .ok_or_else(|| format!("Dereference failed for {}", self.uri).into())
-                .and_then(|deref| deref.typename(required, map)),
-            Primitive(st) => Ok((st.native_typename().unwrap().into(), mods)),
+                .and_then(|deref| deref.typename(root, required, map)),
+            Primitive(st) => Ok(TypeName::new(st.native_typename().unwrap().into(), mods)),
             Array => {
                 map.get(&self.uri.join("items"))
                     .ok_or(ErrorKind::from(format!("Array items not found for {}", self.uri)))?
-                    .typename(true, map)
-                    .map(|(name, mut innermods)| {
-                        innermods.push(Modifier::Vec);
-                        innermods.extend(&mods);
-                        (name, innermods)
+                    .typename(root, true, map)
+                    .map(|mut typename| {
+                        typename.modifiers.push(Modifier::Vec);
+                        typename.modifiers.extend(&mods);
+                        typename
                     })
             }
-            Untyped => Ok((GENERIC_TYPE.into(), mods)),
-            _ => Ok((self.uri.to_name(), mods))
+            Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
+            _ => Ok(TypeName::new(self.uri.to_name(root), mods))
         }
     }
 
     fn to_renderable(&self, root: &str, map: &SchemaMap) -> Result<Renderable> {
-        unimplemented!()
-        // println!("Rendering: {}", self.uri);
-        // use SimpleType::{Object, Boolean, Null, Integer, Number};
-        // let type_ = self.type_.as_ref().map(|t| t.unwrap_or_bail()).unwrap_or(Ok(Object))?;
-        // match type_ {
-        //     Boolean | Integer | Null | Number | SimpleType::String => Ok(Renderable::Primitive),
-        //     SimpleType::Array => {
-        //         let tags = vec![];
-        //         let inner = {
-        //             match self.items {
-        //                 Some(SchemaOrSchemas::Schema(ref schema)) => {
-        //                     schema.typename(root, uri, true, map)
-        //                 }
-        //                 Some(SchemaOrSchemas::Schemas(_)) => {
-        //                     bail!("Multiple items not supported in schema {}", uri)
-        //                 }
-        //                 None => GENERIC_TYPE.into(),   // Unknown type, accept anything
-        //             }
-        //         };
-        //         let name = uri.to_name(root).to_string();
-        //         Ok(Renderable::Array(Array { name, tags, inner }))
-        //     }
-        //     Object => self.renderable_object(root, uri, map)
-        // }
+        println!("Rendering: {}", self.uri);
+        use SchemaType::*;
+        match self.schema_type {
+            Primitive(_) | Reference(_) | Array | Untyped => {
+                let name = self.uri.to_name(root);
+                let inner = self.typename(root, true, map)?;
+                let tags = vec![];
+                Ok(Renderable::Alias(Alias::new(name, inner, tags)))
+            },
+            AnyOf | OneOf => unimplemented!(),
+            AllOf => unimplemented!(),
+            Enum => unimplemented!(),
+            Object => self.renderable_object(root, map)
+        }
     }
 
-    // fn renderable_object(&self, root: &str, uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
-    //     let name = uri.to_name(root).to_string();
+    fn renderable_object(&self, root: &str, map: &SchemaMap) -> Result<Renderable> {
+        // if let Some(anyarr) = self.any_of.as_ref() {
+        //     // we are going to make an enum
+        //     let variants : Result<Vec<_>> = anyarr.iter().enumerate().map(|(ix, any)| {
+        //         let uri = uri.join("anyOf").join(ix);
+        //         Ok(any.typename(root, &uri, true, map))
+        //     }).collect();
+        //     return Ok(Renderable::Enum(Enum::new(name, vec![], variants?)?))
+        // }
 
-    //     if let Some(anyarr) = self.any_of.as_ref() {
-    //         // we are going to make an enum
-    //         let variants : Result<Vec<_>> = anyarr.iter().enumerate().map(|(ix, any)| {
-    //             let uri = uri.join("anyOf").join(ix);
-    //             Ok(any.typename(root, &uri, true, map))
-    //         }).collect();
-    //         return Ok(Renderable::Enum(Enum::new(name, vec![], variants?)?))
-    //     }
+        // if let Some(allarr) = self.all_of.as_ref() {
+        //     println!("ALL OF: {}", uri);
+        //     let merged_schema = merge_schemas(allarr, map)?;
+        //     return merged_schema.to_renderable(root, &uri, map)
+        // }
 
-    //     if let Some(allarr) = self.all_of.as_ref() {
-    //         println!("ALL OF: {}", uri);
-    //         let merged_schema = merge_schemas(allarr, map)?;
-    //         return merged_schema.to_renderable(root, &uri, map)
-    //     }
-
-    //     let required_keys: HashSet<String> = self.required
-    //         .as_ref()
-    //         .map(|v| v.iter().map(|s| s.clone()).collect())
-    //         .unwrap_or(HashSet::new());
-    //     let fields = self.properties
-    //         .as_ref()
-    //         .unwrap_or(&Map::new())
-    //         .iter()
-    //         .map(|(name, schema)| {
-    //             let is_required = required_keys.contains(name);
-    //             let tags = vec![];
-    //             let type_ = schema.typename(root, uri, is_required, map);
-    //             Ok(Field::new(name.clone(), type_, tags)?)
-    //         })
-    //         .collect::<Result<Vec<Field>>>()?;
-    //     let tags = vec![];
-    //     Ok(Renderable::Struct(Struct::new(name, tags, fields)?))
-    // }
+        let required_keys: HashSet<String> = self.schema.required
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.clone()).collect())
+            .unwrap_or(HashSet::new());
+        let fields = self.schema.properties
+            .as_ref()
+            .unwrap_or(&Map::new())
+            .keys()
+            .map(|name| {
+                let uri = self.uri.join("properties").join("name");
+                let metaschema = map.get(&uri)
+                    .ok_or(ErrorKind::from(format!("Dereference failed for {}", uri)))?;
+                let is_required = required_keys.contains(name);
+                let tags = vec![];
+                let typename = metaschema.typename(root, is_required, map)?;
+                Ok(Field::new(name.clone(), typename, tags)?)
+            })
+            .collect::<Result<Vec<Field>>>()?;
+        let name = self.uri.to_name(root);
+        let tags = vec![];
+        Ok(Renderable::Struct(Struct::new(name, tags, fields)?))
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -586,10 +577,10 @@ pub enum BoolOrSchema {
     Schema(Box<Schema>),
 }
 
+// TODO could remove this and just use Box<ToTokens>
 #[derive(Clone, PartialEq, Debug)]
 enum Renderable {
-    Primitive,
-    Array(Array),
+    Alias(Alias),
     Enum(Enum),
     Struct(Struct),
 }
@@ -598,8 +589,7 @@ impl ToTokens for Renderable {
     fn to_tokens(&self, tokens: &mut Tokens) {
         use Renderable::*;
         match *self {
-            Primitive => {}  // No need to render a primitive
-            Array(ref elem) => elem.to_tokens(tokens),
+            Alias(ref elem) => elem.to_tokens(tokens),
             Enum(ref elem) => elem.to_tokens(tokens),
             Struct(ref elem) => elem.to_tokens(tokens),
         }
@@ -635,6 +625,41 @@ fn make_valid_identifier(s: String) -> Result<String> {
         bail!("could not generate valid identifier from {}", s)
     }
     Ok(out)
+}
+
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize, new)]
+struct TypeName {
+    base: String,
+    modifiers: Vec<Modifier>
+}
+
+impl ToTokens for TypeName {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        use Modifier::*;
+        let base = Ident::new(&*self.base);
+        let mut tok = quote!{ #base };
+        for modifier in &self.modifiers {
+            tok = match *modifier {
+                Option => quote! {
+                    Option<#tok>
+                },
+                Box => quote! {
+                    Box<#tok>
+                },
+                Vec => quote! {
+                    Vec<#tok>
+                }
+            };
+        }
+        tokens.append(tok)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug, Deserialize, Serialize)]
+enum Modifier {
+    Option,
+    Box,
+    Vec
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -674,19 +699,12 @@ impl ToTokens for Struct {
 #[derive(Clone, PartialEq, Debug)]
 struct Field {
     name: String,
-    type_: String,
+    typename: TypeName,
     tags: Vec<Tokens>,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Modifier {
-    Option,
-    Box,
-    Vec
-}
-
 impl Field {
-    fn new(name: String, modifiers: &Vec<Modifier>, type_: String, mut tags: Vec<Tokens>) -> Result<Field> {
+    fn new(name: String, typename: TypeName, mut tags: Vec<Tokens>) -> Result<Field> {
         let snake = make_valid_identifier(name.to_snake_case())?;
         if name != snake {
             tags.push(quote!{
@@ -695,7 +713,7 @@ impl Field {
         }
         Ok(Field {
             name: snake,
-            type_,
+            typename,
             tags,
         })
     }
@@ -705,11 +723,11 @@ impl ToTokens for Field {
     fn to_tokens(&self, tokens: &mut Tokens) {
         let name = Ident::new(&*self.name);
         let tags: Vec<_> = self.tags.iter().map(|t| Ident::new(t.as_str())).collect();
-        let type_ = Ident::new(&*self.type_);
+        let typename = &self.typename;
         let tok =
             quote! {
             #(#tags),*
-            #name: #type_
+            #name: #typename
         };
         tokens.append(tok);
     }
@@ -750,22 +768,28 @@ impl ToTokens for Enum {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-pub struct Array {
+#[derive(Clone, PartialEq, Debug)]
+pub struct Alias {
     name: String,
-    tags: Vec<String>,
-    inner: String,
+    tags: Vec<Tokens>,
+    typename: TypeName,
 }
 
-impl ToTokens for Array {
+impl Alias {
+    fn new(name: String, typename: TypeName, tags: Vec<Tokens>) -> Alias {
+        Alias{name, tags, typename}
+    }
+}
+
+impl ToTokens for Alias {
     fn to_tokens(&self, tokens: &mut Tokens) {
         let name = Ident::new(&*self.name);
         let tags: Vec<_> = self.tags.iter().map(|t| Ident::new(t.as_str())).collect();
-        let inner = Ident::new(&*self.inner);
+        let typename = &self.typename;
         let tok =
             quote! {
             #(#tags),*
-            type #name = Vec<#inner>;
+            type #name = #typename;
         };
         tokens.append(tok);
     }
