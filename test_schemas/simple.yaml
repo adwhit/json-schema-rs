@@ -55,6 +55,11 @@ definitions:
             items:
               $ref: "#/definitions/AGE"
 
+  or pick from these:
+    oneOf:
+      - type: integer
+      - type: array    # TODO This doesn't work
+
   combine these:
     allOf:
       - properties:

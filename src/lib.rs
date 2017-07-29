@@ -359,7 +359,6 @@ fn merge_schemas(uris: &Vec<Uri>, map: &SchemaMap) -> Result<Schema> {
     } else {
         None
     };
-    println!("MERGED");
     Ok(newschema)
 }
 
@@ -528,6 +527,24 @@ impl MetaSchema {
     }
 
     fn to_renderable(&self, root: &str, map: &SchemaMap) -> Result<Renderable> {
+
+        fn any_or_one_of(
+            arrlen: usize,
+            root: &str,
+            uri: &Uri,
+            map: &SchemaMap,
+        ) -> Result<Renderable> {
+            // we are going to make an enum
+            let name = uri.to_type_name(root)?;
+            let variants = (0..arrlen)
+                .map(|ix| {
+                    let uri = uri.join(ix + 1);
+                    mapget(map, &uri).and_then(|elem| Ok(elem.typename(root, true, map)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Renderable::Enum(EnumStruct::new(name, vec![], variants)?));
+        }
+
         use Enum as EnumStruct;
         use SchemaType::*;
         match self.schema_type {
@@ -538,20 +555,15 @@ impl MetaSchema {
                 Ok(Renderable::Alias(Alias::new(name, inner, tags)))
             }
             AnyOf => {
-                // we are going to make an enum
-                let anyarr = self.schema.any_of.as_ref().unwrap();
-                let name = self.uri.to_type_name(root)?;
-                let variants = (0..anyarr.len())
-                    .map(|ix| {
-                        let uri = self.uri.join("anyOf").join(ix + 1);
-                        mapget(map, &uri).and_then(|any_elem| {
-                            Ok(any_elem.typename(root, true, map)?)
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                return Ok(Renderable::Enum(EnumStruct::new(name, vec![], variants)?));
+                let arrlen = self.schema.any_of.as_ref().unwrap().len();
+                let uri = self.uri.join("anyOf");
+                any_or_one_of(arrlen, root, &uri, map)
             }
-            OneOf => unimplemented!(),
+            OneOf => {
+                let arrlen = self.schema.one_of.as_ref().unwrap().len();
+                let uri = self.uri.join("oneOf");
+                any_or_one_of(arrlen, root, &uri, map)
+            }
             AllOf => {
                 let all_of_uri = self.uri.join("allOf");
                 let allarrlen = self.schema.all_of.as_ref().unwrap().len();
@@ -605,7 +617,6 @@ impl MetaSchema {
 }
 
 fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
-    println!("GET: {}", uri);
     map.get(uri).ok_or_else(|| {
         format!("Dereference failed for {}", uri).into()
     })
@@ -706,18 +717,18 @@ impl ToTokens for TypeName {
             tok = match *modifier {
                 Option => {
                     quote! {
-                    Option<#tok>
-                }
+                        Option<#tok>
+                    }
                 }
                 Box => {
                     quote! {
-                    Box<#tok>
-                }
+                        Box<#tok>
+                    }
                 }
                 Vec => {
                     quote! {
-                    Vec<#tok>
-                }
+                        Vec<#tok>
+                    }
                 }
             };
         }
