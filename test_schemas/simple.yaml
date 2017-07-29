@@ -32,6 +32,25 @@ definitions:
         type: integer
       other:
         type: array
+      more:
+        required:
+          - x
+        properties:
+          x: {}
+          y: {}
 
   AGE:
     type: number
+
+  pick from these:
+    anyOf:
+      - type: integer
+      - type: string
+      - type: object
+        required:
+          - some property here
+        properties:
+          some property here:
+            type: array
+            items:
+              $ref: "#/definitions/AGE"
