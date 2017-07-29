@@ -12,6 +12,8 @@ extern crate quote;
 extern crate rustfmt;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate derive_new;
 
 use std::fs::File;
 use std::path::Path;
@@ -209,8 +211,8 @@ impl Uri {
     }
 
     fn to_name(&self, root: &str) -> String {
-        let rx = regex::Regex::new("^#/").unwrap();
-        let uri = rx.replace(&self.0, format!("{}/", root).as_str());
+        let rx = regex::Regex::new(r"^#").unwrap();
+        let uri = rx.replace(&self.0, root);
         let name = uri.split("/").last().unwrap();
         match name.parse::<i32>() {
             // it was an array index (i.e. anonymous).
@@ -295,8 +297,8 @@ impl Schema {
         } else if self.properties.is_some() {
             Ok(SchemaType::Object)
         } else {
-            bail!("Failed to identify schema {}", self)
-            //Ok(SchemaType::Untyped)  // Default assume object
+            //bail!("Failed to identify schema {}", self)
+            Ok(SchemaType::Untyped)  // Default assume object
         }
     }
 }
@@ -467,16 +469,18 @@ impl MetaSchema {
             Primitive(st) => Ok(TypeName::new(st.native_typename().unwrap().into(), mods)),
             Array => {
                 map.get(&self.uri.join("items"))
-                    .ok_or(ErrorKind::from(format!("Array items not found for {}", self.uri)))?
-                    .typename(root, true, map)
-                    .map(|mut typename| {
-                        typename.modifiers.push(Modifier::Vec);
-                        typename.modifiers.extend(&mods);
-                        typename
+                    .map(|metaschema| {
+                        metaschema.typename(root, true, map)
+                            .map(|mut typename| {
+                                typename.modifiers.push(Modifier::Vec);
+                                typename.modifiers.extend(&mods);
+                                typename
+                            })
                     })
+                    .unwrap_or(Ok(TypeName::new(GENERIC_TYPE.into(), mods)))
             }
             Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
-            _ => Ok(TypeName::new(self.uri.to_name(root), mods))
+            _ => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
         }
     }
 
@@ -522,18 +526,20 @@ impl MetaSchema {
             .unwrap_or(&Map::new())
             .keys()
             .map(|name| {
-                let uri = self.uri.join("properties").join("name");
+                let uri = self.uri.join("properties").join(name);
                 let metaschema = map.get(&uri)
                     .ok_or(ErrorKind::from(format!("Dereference failed for {}", uri)))?;
                 let is_required = required_keys.contains(name);
                 let tags = vec![];
                 let typename = metaschema.typename(root, is_required, map)?;
-                Ok(Field::new(name.clone(), typename, tags)?)
+                Ok(Field::new(name.clone(), typename, tags)
+                   .chain_err(|| format!("Failed to create field {} at uri {}", name, uri))?)
             })
             .collect::<Result<Vec<Field>>>()?;
         let name = self.uri.to_name(root);
         let tags = vec![];
-        Ok(Renderable::Struct(Struct::new(name, tags, fields)?))
+        Ok(Renderable::Struct(Struct::new(name, tags, fields)
+                              .chain_err(|| format!("Failed to create struct at uri {}", self.uri))?))
     }
 }
 
@@ -543,16 +549,6 @@ pub enum SchemaOrSchemas {
     Schema(Box<Schema>),
     Schemas(Schemas),
 }
-
-impl SchemaOrSchemas {
-    fn unwrap_or_bail(&self) -> Result<&Schema> {
-        match *self {
-            SchemaOrSchemas::Schema(ref schema) => Ok(schema),
-            _ => bail!("Multiple types not supported"),
-        }
-    }
-}
-
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -883,6 +879,8 @@ mod tests {
         assert_eq!(id1.to_name("root"), "MyType");
         let id2: Uri = "#/some/other/route/1".into();
         assert_eq!(id2.to_name("root"), "RootSomeOtherRoute1");
+        let id3: Uri = "#".into();
+        assert_eq!(id3.to_name("root"), "Root");
     }
 
     #[test]
