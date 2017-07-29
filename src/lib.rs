@@ -199,10 +199,10 @@ impl Uri {
     fn is_definition(&self) -> bool {
         let split: Vec<_> = self.0.split("/").collect();
         let l = split.len();
-        if l < 2 {
+        if l == 1 {
             false
         } else {
-            split[l-2] == "defintions"
+            split[l-2] == "definitions"
         }
     }
 
@@ -243,6 +243,8 @@ impl Deref for Uri {
 impl Schema {
     /// find every instance in which a schema is defined or referenced
     fn gather_definitions(&self, uri: &Uri, schema_map: &mut SchemaMap) -> Result<()> {
+        // TODO: This is a full recursive clone. Would be nice to replace
+        // all Schema instances with URIs
         let meta = MetaSchema::from_schema(uri.clone(), self.clone())?;
         if schema_map.insert(uri.clone(), meta).is_some() {
             bail!("Schema already exists at location {}", uri)
@@ -435,6 +437,7 @@ fn collect_renderable_definitions(map: &SchemaMap) -> Vec<&MetaSchema> {
 
 type Schemas = Vec<Schema>;
 
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 enum SchemaType {
     Reference(Uri),
     Primitive(SimpleType),
@@ -447,6 +450,7 @@ enum SchemaType {
     Untyped,
 }
 
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 struct MetaSchema {
     uri: Uri,
     schema_type: SchemaType,
@@ -461,18 +465,18 @@ impl MetaSchema {
 
     fn typename(&self, root: &str, required: bool, map: &SchemaMap) -> Result<TypeName> {
         use SchemaType::*;
-        let mods = if !required { vec![Modifier::Option] } else { vec![] };
+        let mut mods = if !required { vec![Modifier::Option] } else { vec![] };
         match self.schema_type {
             Reference(ref uri) => map.get(uri)
                 .ok_or_else(|| format!("Dereference failed for {}", self.uri).into())
                 .and_then(|deref| deref.typename(root, required, map)),
             Primitive(st) => Ok(TypeName::new(st.native_typename().unwrap().into(), mods)),
             Array => {
+                mods.push(Modifier::Vec);
                 map.get(&self.uri.join("items"))
                     .map(|metaschema| {
                         metaschema.typename(root, true, map)
                             .map(|mut typename| {
-                                typename.modifiers.push(Modifier::Vec);
                                 typename.modifiers.extend(&mods);
                                 typename
                             })
@@ -485,7 +489,6 @@ impl MetaSchema {
     }
 
     fn to_renderable(&self, root: &str, map: &SchemaMap) -> Result<Renderable> {
-        println!("Rendering: {}", self.uri);
         use SchemaType::*;
         match self.schema_type {
             Primitive(_) | Reference(_) | Array | Untyped => {
@@ -512,7 +515,6 @@ impl MetaSchema {
         // }
 
         // if let Some(allarr) = self.all_of.as_ref() {
-        //     println!("ALL OF: {}", uri);
         //     let merged_schema = merge_schemas(allarr, map)?;
         //     return merged_schema.to_renderable(root, &uri, map)
         // }
@@ -881,6 +883,9 @@ mod tests {
         assert_eq!(id2.to_name("root"), "RootSomeOtherRoute1");
         let id3: Uri = "#".into();
         assert_eq!(id3.to_name("root"), "Root");
+        // TODO make this work
+        // let id4: Uri = "#more".into();
+        // assert_eq!(id3.to_name("root"), "More");
     }
 
     #[test]

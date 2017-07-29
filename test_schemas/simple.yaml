@@ -1,3 +1,5 @@
+required:
+  - prop1
 properties:
   prop1:
     type: integer
@@ -8,3 +10,5 @@ definitions:
   IntWrapper:
     type: integer
 
+  some array:
+    type: array
