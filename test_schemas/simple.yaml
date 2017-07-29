@@ -54,3 +54,12 @@ definitions:
             type: array
             items:
               $ref: "#/definitions/AGE"
+
+  combine these:
+    allOf:
+      - properties:
+          name:
+            type: string
+      - properties:
+          height:
+            type: number

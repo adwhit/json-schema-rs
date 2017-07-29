@@ -260,7 +260,6 @@ impl Schema {
     fn gather_definitions(&self, uri: &Uri, schema_map: &mut SchemaMap) -> Result<()> {
         // TODO: This is a full recursive clone. Would be nice to replace
         // all Schema instances with URIs
-        println!("Gathering: {}", uri);
         let meta = MetaSchema::from_schema(uri.clone(), self.clone())?;
         if schema_map.insert(uri.clone(), meta).is_some() {
             bail!("Schema already exists at location {}", uri)
@@ -312,40 +311,56 @@ impl Schema {
     }
 }
 
-fn merge_schemas(schemas: &Vec<Schema>, map: &SchemaMap) -> Result<Schema> {
-    // let mut all_props = Map::<Schema>::new();
-    // let mut types = Vec::new();
-    // let _: () = schemas.iter().map(|schema| {
-    //     let real_schema = schema.resolve("dummy".into(), map)?;
-    //     if let Some(ref type_) = real_schema.type_ {
-    //         types.push(type_.unwrap_or_bail()?)
-    //     };
-    //     real_schema.properties.as_ref().map(|map| {
-    //         map.iter().map(|(name, propschema)| {
-    //             match all_props.insert(name.clone(), propschema.clone()) {
-    //                 Some(_) => bail!("Duplicate key found: {}", name),
-    //                 None => Ok(())
-    //             }
-    //         }).collect::<Result<Vec<_>>>().map(|_| ())
-    //     }).unwrap_or(Ok(()))
-    // }).collect::<Result<Vec<()>>>().map(|_| ())?;
-    // let mut newschema: Schema = Default::default();
-    // let type_ = {
-    //     let dedup: HashSet<_> = types.iter().collect();
-    //     match dedup.len() {
-    //         0 => SimpleType::Object,
-    //         1 => *types.first().unwrap(),
-    //         _ => bail!("Inconsistent types for allOf: {:?}", types)
-    //     }
-    // };
-    // newschema.type_ = Some(SimpleTypeOrSimpleTypes::SimpleType(type_));
-    // newschema.properties = if all_props.len() > 0 {
-    //     Some(all_props)
-    // } else {
-    //     None
-    // };
-    // Ok(newschema)
-    unimplemented!()
+fn merge_schemas(uris: &Vec<Uri>, map: &SchemaMap) -> Result<Schema> {
+    let mut all_props = Map::<Schema>::new();
+    let mut types = Vec::new();
+    let schemas = uris.iter()
+        .map(|uri| mapget(map, uri))
+        .collect::<Result<Vec<_>>>()?;
+    let _: () = schemas
+        .iter()
+        .map(|schema| {
+            let real_schema = schema.resolve(map)?;
+            if let Some(ref type_) = real_schema.schema.type_ {
+                types.push(type_.unwrap_or_bail()?)
+            };
+            real_schema
+                .schema
+                .properties
+                .as_ref()
+                .map(|map| {
+                    map.iter()
+                        .map(|(name, propschema)| match all_props.insert(
+                            name.clone(),
+                            propschema.clone(),
+                        ) {
+                            Some(_) => bail!("Duplicate key found: {}", name),
+                            None => Ok(()),
+                        })
+                        .collect::<Result<Vec<_>>>()
+                        .map(|_| ())
+                })
+                .unwrap_or(Ok(()))
+        })
+        .collect::<Result<Vec<()>>>()
+        .map(|_| ())?;
+    let mut newschema: Schema = Default::default();
+    let type_ = {
+        let dedup: HashSet<_> = types.iter().collect();
+        match dedup.len() {
+            0 => SimpleType::Object,
+            1 => *types.first().unwrap(),
+            _ => bail!("Inconsistent types for allOf: {:?}", types),
+        }
+    };
+    newschema.type_ = Some(SimpleTypeOrSimpleTypes::SimpleType(type_));
+    newschema.properties = if all_props.len() > 0 {
+        Some(all_props)
+    } else {
+        None
+    };
+    println!("MERGED");
+    Ok(newschema)
 }
 
 fn gather_definitions_map(
@@ -484,14 +499,12 @@ impl MetaSchema {
         };
         match self.schema_type {
             Reference(ref uri) => {
-                map.get(uri)
-                    .ok_or_else(|| format!("Dereference failed for {}", uri).into())
-                    .and_then(|deref| deref.typename(root, required, map))
+                mapget(map, uri).and_then(|deref| deref.typename(root, required, map))
             }
             Primitive(st) => Ok(TypeName::new(st.native_typename().unwrap().into(), mods)),
             Array => {
                 mods.insert(0, Modifier::Vec);
-                map.get(&self.uri.join("items"))
+                mapget(map, &self.uri.join("items"))
                     .map(|metaschema| {
                         metaschema.typename(root, true, map).map(|mut typename| {
                             typename.modifiers.extend(&mods);
@@ -503,6 +516,14 @@ impl MetaSchema {
             Object => Ok(TypeName::new(self.uri.to_type_name(root)?, mods)),
             Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
             _ => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
+        }
+    }
+
+    fn resolve<'a>(&'a self, map: &'a SchemaMap) -> Result<&'a MetaSchema> {
+        if let SchemaType::Reference(ref uri) = self.schema_type {
+            mapget(map, uri).and_then(|schema| schema.resolve(map))
+        } else {
+            Ok(self)
         }
     }
 
@@ -523,15 +544,21 @@ impl MetaSchema {
                 let variants = (0..anyarr.len())
                     .map(|ix| {
                         let uri = self.uri.join("anyOf").join(ix + 1);
-                        map.get(&uri)
-                            .ok_or(ErrorKind::from(format!("Failed to resolve {}", uri)).into())
-                            .and_then(|any_elem| Ok(any_elem.typename(root, true, map)?))
+                        mapget(map, &uri).and_then(|any_elem| {
+                            Ok(any_elem.typename(root, true, map)?)
+                        })
                     })
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(Renderable::Enum(EnumStruct::new(name, vec![], variants)?));
             }
             OneOf => unimplemented!(),
-            AllOf => unimplemented!(),
+            AllOf => {
+                let all_of_uri = self.uri.join("allOf");
+                let allarrlen = self.schema.all_of.as_ref().unwrap().len();
+                let uris = (0..allarrlen).map(|ix| all_of_uri.join(ix + 1)).collect();
+                let merged = MetaSchema::from_schema(all_of_uri, merge_schemas(&uris, map)?)?;
+                merged.to_renderable(root, map)
+            }
             Enum => unimplemented!(),
             Object => self.renderable_object(root, map),
         }
@@ -556,9 +583,7 @@ impl MetaSchema {
             .keys()
             .map(|field_name| {
                 let uri = self.uri.join("properties").join(field_name);
-                let metaschema = map.get(&uri).ok_or(ErrorKind::from(
-                    format!("Dereference failed for {}", uri),
-                ))?;
+                let metaschema = mapget(map, &uri)?;
                 let is_required = required_keys.contains(field_name);
                 let tags = vec![];
                 let typename = metaschema.typename(root, is_required, map)?;
@@ -577,6 +602,13 @@ impl MetaSchema {
             })?,
         ))
     }
+}
+
+fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
+    println!("GET: {}", uri);
+    map.get(uri).ok_or_else(|| {
+        format!("Dereference failed for {}", uri).into()
+    })
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -891,7 +923,7 @@ mod tests {
     fn gather_schemas() {
         let root = metaschema();
         let map = root.gather_definitions().unwrap();
-        assert_eq!(map.len(), 42)
+        assert_eq!(map.len(), 51)
     }
 
     #[test]
