@@ -4,11 +4,34 @@ properties:
   prop1:
     type: integer
   prop2:
-    $ref: "#/definitions/IntWrapper"
+    $ref: "#/definitions/intWrapper"
+  mod:
+    required:
+      - name
+    properties:
+      name:
+        type: string
+      Weight of me:
+        $ref: "#/definitions/AGE"
+      Fear of me:
+        $ref: "#/definitions/badly named array"
 
 definitions:
-  IntWrapper:
+  intWrapper:
     type: integer
+    some:
+      none:
+        conforming: nonsense
 
-  some array:
-    type: array
+  badly named array:
+    type: object
+    properties:
+      this:
+        type: string
+      that:
+        type: integer
+      other:
+        type: array
+
+  AGE:
+    type: number

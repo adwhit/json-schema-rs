@@ -195,36 +195,6 @@ impl<'a> From<&'a str> for Uri {
     }
 }
 
-impl Uri {
-    fn is_definition(&self) -> bool {
-        let split: Vec<_> = self.0.split("/").collect();
-        let l = split.len();
-        if l == 1 {
-            false
-        } else {
-            split[l-2] == "definitions"
-        }
-    }
-
-    fn join<T: fmt::Display>(&self, next: T) -> Uri {
-        Uri(format!("{}/{}", self, next))
-    }
-
-    fn to_name(&self, root: &str) -> String {
-        let rx = regex::Regex::new(r"^#").unwrap();
-        let uri = rx.replace(&self.0, root);
-        let name = uri.split("/").last().unwrap();
-        match name.parse::<i32>() {
-            // it was an array index (i.e. anonymous).
-            // so just return the whole uri and do name mangling later
-            // TODO where else might anonymous types occur?
-            Ok(_) => uri.replace('/', " ").to_pascal_case(),
-            _ => name.to_pascal_case(),
-        }
-    }
-
-}
-
 impl fmt::Display for Uri {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -239,6 +209,47 @@ impl Deref for Uri {
     }
 }
 
+impl Uri {
+    fn identify(&self) -> Identified {
+        let redef = regex::Regex::new(r"/definitions/([^/]+)$").unwrap();
+        let reprop = regex::Regex::new(r"/properties/([^/]+)$").unwrap();
+        if self.deref() == "#" {
+            Identified::Root
+        } else if let Some(c) = redef.captures(&*self) {
+            Identified::Definition(c.get(1).unwrap().as_str())
+        } else if let Some(c) = reprop.captures(&*self) {
+            return Identified::Property(c.get(1).unwrap().as_str())
+        } else {
+            Identified::Unknown
+        }
+    }
+
+    fn is_definition(&self) -> bool {
+        if let Identified::Definition(_) = self.identify() {true} else {false}
+    }
+
+    fn join<T: fmt::Display>(&self, next: T) -> Uri {
+        Uri(format!("{}/{}", self, next))
+    }
+
+    fn to_type_name(&self, root: &str) -> Result<String> {
+        use Identified::*;
+        let name = match self.identify() {
+            Definition(def) => def.to_pascal_case(),
+            Property(prop) => format!("Property{}", prop.to_pascal_case()),
+            Root => root.to_pascal_case(),
+            Unknown => (&*self).replace("/", " ").to_pascal_case()
+        };
+        make_valid_identifier(&name)
+    }
+}
+
+enum Identified<'a> {
+    Definition(&'a str),
+    Property(&'a str),
+    Root,
+    Unknown
+}
 
 impl Schema {
     /// find every instance in which a schema is defined or referenced
@@ -468,11 +479,11 @@ impl MetaSchema {
         let mut mods = if !required { vec![Modifier::Option] } else { vec![] };
         match self.schema_type {
             Reference(ref uri) => map.get(uri)
-                .ok_or_else(|| format!("Dereference failed for {}", self.uri).into())
+                .ok_or_else(|| format!("Dereference failed for {}", uri).into())
                 .and_then(|deref| deref.typename(root, required, map)),
             Primitive(st) => Ok(TypeName::new(st.native_typename().unwrap().into(), mods)),
             Array => {
-                mods.push(Modifier::Vec);
+                mods.insert(0, Modifier::Vec);
                 map.get(&self.uri.join("items"))
                     .map(|metaschema| {
                         metaschema.typename(root, true, map)
@@ -483,6 +494,7 @@ impl MetaSchema {
                     })
                     .unwrap_or(Ok(TypeName::new(GENERIC_TYPE.into(), mods)))
             }
+            Object => Ok(TypeName::new(self.uri.to_type_name(root)?, mods)),
             Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
             _ => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
         }
@@ -492,7 +504,7 @@ impl MetaSchema {
         use SchemaType::*;
         match self.schema_type {
             Primitive(_) | Reference(_) | Array | Untyped => {
-                let name = self.uri.to_name(root);
+                let name = self.uri.to_type_name(root)?;
                 let inner = self.typename(root, true, map)?;
                 let tags = vec![];
                 Ok(Renderable::Alias(Alias::new(name, inner, tags)))
@@ -527,18 +539,18 @@ impl MetaSchema {
             .as_ref()
             .unwrap_or(&Map::new())
             .keys()
-            .map(|name| {
-                let uri = self.uri.join("properties").join(name);
+            .map(|field_name| {
+                let uri = self.uri.join("properties").join(field_name);
                 let metaschema = map.get(&uri)
                     .ok_or(ErrorKind::from(format!("Dereference failed for {}", uri)))?;
-                let is_required = required_keys.contains(name);
+                let is_required = required_keys.contains(field_name);
                 let tags = vec![];
                 let typename = metaschema.typename(root, is_required, map)?;
-                Ok(Field::new(name.clone(), typename, tags)
-                   .chain_err(|| format!("Failed to create field {} at uri {}", name, uri))?)
+                Ok(Field::new(field_name.clone(), typename, tags)
+                   .chain_err(|| format!("Failed to create field {} at uri {}", field_name, uri))?)
             })
             .collect::<Result<Vec<Field>>>()?;
-        let name = self.uri.to_name(root);
+        let name = self.uri.to_type_name(root)?;
         let tags = vec![];
         Ok(Renderable::Struct(Struct::new(name, tags, fields)
                               .chain_err(|| format!("Failed to create struct at uri {}", self.uri))?))
@@ -594,7 +606,7 @@ impl ToTokens for Renderable {
     }
 }
 
-fn make_valid_identifier(s: String) -> Result<String> {
+fn make_valid_identifier(s: &str) -> Result<String> {
     // strip out invalid characters and ensure result is valid
     // bit ugly to reallocate but at least it is simple
     // TODO use unicode XID_start/XID_continue
@@ -669,7 +681,7 @@ pub struct Struct {
 
 impl Struct {
     fn new(name: String, mut tags: Vec<Tokens>, fields: Vec<Field>) -> Result<Struct> {
-        let name = make_valid_identifier(name.to_pascal_case())?;
+        let name = make_valid_identifier(&name.to_pascal_case())?;
         tags.push(quote! {
             #[derive(Debug, Clone, Default, PartialEq)]
         });
@@ -703,7 +715,7 @@ struct Field {
 
 impl Field {
     fn new(name: String, typename: TypeName, mut tags: Vec<Tokens>) -> Result<Field> {
-        let snake = make_valid_identifier(name.to_snake_case())?;
+        let snake = make_valid_identifier(&name.to_snake_case())?;
         if name != snake {
             tags.push(quote!{
                 #[serde(rename = #name)]
@@ -740,9 +752,8 @@ struct Enum {
 
 impl Enum {
     fn new(name: String, tags: Vec<Tokens>, variants: Vec<String>) -> Result<Enum> {
-        let name = make_valid_identifier(name.to_pascal_case())?;
         let variants = variants.into_iter().map(|v| {
-            let valid = make_valid_identifier(v)?;
+            let valid = make_valid_identifier(&v)?;
             Ok((valid.clone(), valid))
         }).collect::<Result<Vec<_>>>()?;
         Ok(Enum { name, tags, variants })
@@ -878,11 +889,11 @@ mod tests {
     #[test]
     fn test_uri_to_name() {
         let id1: Uri = "#/this/is/some/route/my type".into();
-        assert_eq!(id1.to_name("root"), "MyType");
-        let id2: Uri = "#/some/other/route/1".into();
-        assert_eq!(id2.to_name("root"), "RootSomeOtherRoute1");
+        assert_eq!(id1.to_type_name("root").unwrap(), "ThisIsSomeRouteMyType");
+        let id2: Uri = "#/properties/aProp".into();
+        assert_eq!(id2.to_type_name("root").unwrap(), "PropertyAprop");
         let id3: Uri = "#".into();
-        assert_eq!(id3.to_name("root"), "Root");
+        assert_eq!(id3.to_type_name("root").unwrap(), "Root");
         // TODO make this work
         // let id4: Uri = "#more".into();
         // assert_eq!(id3.to_name("root"), "More");
