@@ -52,7 +52,7 @@ pub type SchemaArray = Vec<Schema>;
 pub type StringArray = Vec<String>;
 
 type Map<T> = BTreeMap<String, T>;
-type SchemaMap = BTreeMap<Uri, (SchemaType, Schema)>;
+type SchemaMap = BTreeMap<Uri, MetaSchema>;
 
 #[serde(rename = "simpleTypes")]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Serialize, Hash)]
@@ -187,6 +187,12 @@ impl fmt::Display for Schema {
 #[derive(Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord, Deserialize, Serialize)]
 struct Uri(String);
 
+impl<'a> From<&'a str> for Uri {
+    fn from(s: &str) -> Uri {
+        Uri(s.into())
+    }
+}
+
 impl Uri {
     fn is_definition(&self) -> bool {
         let split: Vec<_> = self.0.split("/").collect();
@@ -202,15 +208,13 @@ impl Uri {
         Uri(format!("{}/{}", self, next))
     }
 
-    fn to_name<'a>(&self, root: &'a str) -> String {
-        let rx = regex::Regex::new("^#").unwrap();
-        let uri = rx.replace(&self.0, root);
-        let name = uri.split("/").last().unwrap();
+    fn to_name(&self) -> String {
+        let name = self.0.split("/").last().unwrap();
         match name.parse::<i32>() {
             // it was an array index (i.e. anonymous).
             // so just return the whole uri and do name mangling later
             // TODO where else might anonymous types occur?
-            Ok(_) => uri.replace('/', " ").to_pascal_case(),
+            Ok(_) => self.0.replace('/', " ").to_pascal_case(),
             _ => name.to_pascal_case(),
         }
     }
@@ -235,9 +239,8 @@ impl Deref for Uri {
 impl Schema {
     /// find every instance in which a schema is defined or referenced
     fn gather_definitions(&self, uri: &Uri, schema_map: &mut SchemaMap) -> Result<()> {
-        let schema_type = self.schema_type(uri)?;
-        let exists = schema_map.insert(uri.clone(), (schema_type, self.clone()));
-        if exists.is_some() {
+        let meta = MetaSchema::from_schema(uri.clone(), self.clone())?;
+        if schema_map.insert(uri.clone(), meta).is_some() {
             bail!("Schema already exists at location {}", uri)
         };
         gather_definitions_map(
@@ -268,154 +271,66 @@ impl Schema {
         Ok(())
     }
 
-    fn resolve<'a>(&'a self, uri: Uri, map: &'a SchemaMap) -> Result<(Uri, &'a Schema)> {
-        // TODO implement from<&str> for Uri
-        if let Some(ref ref_) = self.ref_ {
-            let &(ref schema_type, ref deref) = map.get(&Uri(ref_.clone())).ok_or_else(|| {
-                ErrorKind::from(format!("Failed to resolve reference '{}'", ref_))
-            })?;
-            deref.resolve(Uri(ref_.clone()), map)
-        } else {
-            Ok((uri, &self))
-        }
-    }
-
-    fn typename(&self, root: &str, uri: &Uri, required: bool, map: &SchemaMap) -> String {
-        // IFF it is anonymous AND it is primitive, return the name of the
-        // primitive, else return the name from the uri
-        let type_ = self
-            .type_
-            .as_ref()
-            .and_then(|type_or_vec| match *type_or_vec {
-                SimpleTypeOrSimpleTypes::SimpleType(st) => st.native_typename(),
-                _ => None,  // We will need an enum
-            })
-            .map(|name| name.into())
-            .unwrap_or(uri.to_name(root));
-        if required {
-            type_
-        } else {
-            format!("Option<{}>", type_)
-        }
-    }
-
-    fn schema_type(&self, uri: &Uri) -> Result<SchemaType> {
+    fn schema_type(&self) -> Result<SchemaType> {
         use SimpleType::*;
-        if uri.is_definition() {
-            return Ok(SchemaType::Defined)
-        }
-        if let Some(_) = self.ref_ {
-            return Ok(SchemaType::Reference)
-        }
-        if let Some(ref st) = self.type_ {
-            match st.unwrap_or_bail()? {
-                Boolean | Integer | Null | Number | String => Ok(SchemaType::Primitive),
+        if let Some(ref_) = self.ref_.as_ref() {
+            Ok(SchemaType::Reference(ref_.as_str().into()))
+        } else if self.enum_.is_some() {
+            Ok(SchemaType::Enum)
+        } else if self.any_of.is_some() {
+            Ok(SchemaType::AnyOf)
+        } else if self.one_of.is_some() {
+            Ok(SchemaType::AllOf)
+        } else if let Some(ref st) = self.type_ {
+            let st = st.unwrap_or_bail()?;
+            match st {
+                Boolean | Integer | Null | Number | String => Ok(SchemaType::Primitive(st)),
                 Array => Ok(SchemaType::Array),
                 Object => Ok(SchemaType::Object)
             }
-        } else {
+        } else if self.properties.is_some() {
             Ok(SchemaType::Object)
+        } else {
+            bail!("Failed to identify schema {}", self)
+            //Ok(SchemaType::Untyped)  // Default assume object
         }
-    }
-
-    fn to_renderable(&self, root: &str, uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
-        println!("Rendering: {}", uri);
-        use SimpleType::{Object, Boolean, Null, Integer, Number};
-        let type_ = self.type_.as_ref().map(|t| t.unwrap_or_bail()).unwrap_or(Ok(Object))?;
-        match type_ {
-            Boolean | Integer | Null | Number | SimpleType::String => Ok(Renderable::Primitive),
-            SimpleType::Array => {
-                let tags = vec![];
-                let inner = {
-                    match self.items {
-                        Some(SchemaOrSchemas::Schema(ref schema)) => {
-                            schema.typename(root, uri, true, map)
-                        }
-                        Some(SchemaOrSchemas::Schemas(_)) => {
-                            bail!("Multiple items not supported in schema {}", uri)
-                        }
-                        None => GENERIC_TYPE.into(),   // Unknown type, accept anything
-                    }
-                };
-                let name = uri.to_name(root).to_string();
-                Ok(Renderable::Array(Array { name, tags, inner }))
-            }
-            Object => self.renderable_object(root, uri, map)
-        }
-    }
-
-    fn renderable_object(&self, root: &str, uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
-        let name = uri.to_name(root).to_string();
-
-        if let Some(anyarr) = self.any_of.as_ref() {
-            // we are going to make an enum
-            let variants : Result<Vec<_>> = anyarr.iter().enumerate().map(|(ix, any)| {
-                let uri = uri.join("anyOf").join(ix);
-                Ok(any.typename(root, &uri, true, map))
-            }).collect();
-            return Ok(Renderable::Enum(Enum::new(name, vec![], variants?)?))
-        }
-
-        if let Some(allarr) = self.all_of.as_ref() {
-            println!("ALL OF: {}", uri);
-            let merged_schema = merge_schemas(allarr, map)?;
-            return merged_schema.to_renderable(root, &uri, map)
-        }
-
-        let required_keys: HashSet<String> = self.required
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.clone()).collect())
-            .unwrap_or(HashSet::new());
-        let fields = self.properties
-            .as_ref()
-            .unwrap_or(&Map::new())
-            .iter()
-            .map(|(name, schema)| {
-                let is_required = required_keys.contains(name);
-                let tags = vec![];
-                let type_ = schema.typename(root, uri, is_required, map);
-                Ok(Field::new(name.clone(), type_, tags)?)
-            })
-            .collect::<Result<Vec<Field>>>()?;
-        let tags = vec![];
-        Ok(Renderable::Struct(Struct::new(name, tags, fields)?))
     }
 }
 
-fn merge_schemas(schemas: &Vec<Schema>, map: &SchemaMap) -> Result<Schema> {
-    let mut all_props = Map::<Schema>::new();
-    let mut types = Vec::new();
-    let _: () = schemas.iter().map(|schema| {
-        let (_, real_schema) = schema.resolve(Uri("dummy".into()), map)?;
-        if let Some(ref type_) = real_schema.type_ {
-            types.push(type_.unwrap_or_bail()?)
-        };
-        real_schema.properties.as_ref().map(|map| {
-            map.iter().map(|(name, propschema)| {
-                match all_props.insert(name.clone(), propschema.clone()) {
-                    Some(_) => bail!("Duplicate key found: {}", name),
-                    None => Ok(())
-                }
-            }).collect::<Result<Vec<_>>>().map(|_| ())
-        }).unwrap_or(Ok(()))
-    }).collect::<Result<Vec<()>>>().map(|_| ())?;
-    let mut newschema: Schema = Default::default();
-    let type_ = {
-        let dedup: HashSet<_> = types.iter().collect();
-        match dedup.len() {
-            0 => SimpleType::Object,
-            1 => *types.first().unwrap(),
-            _ => bail!("Inconsistent types for allOf: {:?}", types)
-        }
-    };
-    newschema.type_ = Some(SimpleTypeOrSimpleTypes::SimpleType(type_));
-    newschema.properties = if all_props.len() > 0 {
-        Some(all_props)
-    } else {
-        None
-    };
-    Ok(newschema)
-}
+// fn merge_schemas(schemas: &Vec<Schema>, map: &SchemaMap) -> Result<Schema> {
+//     let mut all_props = Map::<Schema>::new();
+//     let mut types = Vec::new();
+//     let _: () = schemas.iter().map(|schema| {
+//         let real_schema) = schema.resolve("dummy".into(), map)?;
+//         if let Some(ref type_) = real_schema.type_ {
+//             types.push(type_.unwrap_or_bail()?)
+//         };
+//         real_schema.properties.as_ref().map(|map| {
+//             map.iter().map(|(name, propschema)| {
+//                 match all_props.insert(name.clone(), propschema.clone()) {
+//                     Some(_) => bail!("Duplicate key found: {}", name),
+//                     None => Ok(())
+//                 }
+//             }).collect::<Result<Vec<_>>>().map(|_| ())
+//         }).unwrap_or(Ok(()))
+//     }).collect::<Result<Vec<()>>>().map(|_| ())?;
+//     let mut newschema: Schema = Default::default();
+//     let type_ = {
+//         let dedup: HashSet<_> = types.iter().collect();
+//         match dedup.len() {
+//             0 => SimpleType::Object,
+//             1 => *types.first().unwrap(),
+//             _ => bail!("Inconsistent types for allOf: {:?}", types)
+//         }
+//     };
+//     newschema.type_ = Some(SimpleTypeOrSimpleTypes::SimpleType(type_));
+//     newschema.properties = if all_props.len() > 0 {
+//         Some(all_props)
+//     } else {
+//         None
+//     };
+//     Ok(newschema)
+// }
 
 fn gather_definitions_map(
     maybe_schma_map: &Option<Map<Schema>>,
@@ -467,16 +382,16 @@ impl RootSchema {
 impl RootSchema {
     fn gather_definitions(&self) -> Result<SchemaMap> {
         let mut map = SchemaMap::new();
-        self.0.gather_definitions(&Uri("#".into()), &mut map)?;
+        self.0.gather_definitions(&"#".into(), &mut map)?;
         Ok(map)
     }
 
     fn renderables(&self, root: &str) -> Result<Vec<Renderable>> {
         let map = self.gather_definitions()?;
-        let defns = resolve_definitions(&map);
+        let defns = collect_renderable_definitions(&map);
         defns
             .iter()
-            .map(|&(uri, &(_, ref schema))| schema.to_renderable(root, uri, &map))
+            .map(|metaschema| metaschema.to_renderable(root, &map))
             .collect()
     }
 
@@ -501,22 +416,134 @@ fn render_all(renderables: &Vec<Renderable>) -> Tokens {
     )
 }
 
-fn resolve_definitions(map: &SchemaMap) -> Vec<(&Uri, &(SchemaType, Schema))> {
+fn collect_renderable_definitions(map: &SchemaMap) -> Vec<&MetaSchema> {
     // Filter out schemas which are just references to other schemas
-    map.iter()
-        .filter(|&(_uri, &(_, ref schema))| schema.ref_.is_none())
-        .map(|(uri, schema)| (uri, schema))
+    map.values()
+        .filter(|metaschema| {
+            if metaschema.uri.is_definition() {
+                true   // always create regardless of content
+            } else {
+                use SchemaType::*;
+                match metaschema.schema_type {
+                    Reference(_) | Primitive(_) | Array | Untyped => false,
+                    Enum | AnyOf | AllOf | Object => true
+                }
+            }
+        })
         .collect()
 }
 
 type Schemas = Vec<Schema>;
 
 enum SchemaType {
-    Reference,
-    Primitive,
+    Reference(Uri),
+    Primitive(SimpleType),
     Array,
+    Enum,
+    AllOf,
+    AnyOf,
     Object,
-    Defined,
+    Untyped,
+}
+
+struct MetaSchema {
+    uri: Uri,
+    schema_type: SchemaType,
+    schema: Schema
+}
+
+impl MetaSchema {
+    fn from_schema(uri: Uri, schema: Schema) -> Result<MetaSchema> {
+        let schema_type = schema.schema_type()?;
+        Ok(MetaSchema{uri, schema_type, schema})
+    }
+
+    fn typename(&self, required: bool, map: &SchemaMap) -> Result<(String, Vec<Modifier>)> {
+        use SchemaType::*;
+        let mods = if !required { vec![Modifier::Option] } else { vec![] };
+        match self.schema_type {
+            Reference(ref uri) => map.get(uri)
+                .ok_or_else(|| format!("Dereference failed for {}", self.uri).into())
+                .and_then(|deref| deref.typename(required, map)),
+            Primitive(st) => Ok((st.native_typename().unwrap().into(), mods)),
+            Array => {
+                map.get(&self.uri.join("items"))
+                    .ok_or(ErrorKind::from(format!("Array items not found for {}", self.uri)))?
+                    .typename(true, map)
+                    .map(|(name, mut innermods)| {
+                        innermods.push(Modifier::Vec);
+                        innermods.extend(&mods);
+                        (name, innermods)
+                    })
+            }
+            Untyped => Ok((GENERIC_TYPE.into(), mods)),
+            _ => Ok((self.uri.to_name(), mods))
+        }
+    }
+
+    fn to_renderable(&self, root: &str, map: &SchemaMap) -> Result<Renderable> {
+        unimplemented!()
+        // println!("Rendering: {}", self.uri);
+        // use SimpleType::{Object, Boolean, Null, Integer, Number};
+        // let type_ = self.type_.as_ref().map(|t| t.unwrap_or_bail()).unwrap_or(Ok(Object))?;
+        // match type_ {
+        //     Boolean | Integer | Null | Number | SimpleType::String => Ok(Renderable::Primitive),
+        //     SimpleType::Array => {
+        //         let tags = vec![];
+        //         let inner = {
+        //             match self.items {
+        //                 Some(SchemaOrSchemas::Schema(ref schema)) => {
+        //                     schema.typename(root, uri, true, map)
+        //                 }
+        //                 Some(SchemaOrSchemas::Schemas(_)) => {
+        //                     bail!("Multiple items not supported in schema {}", uri)
+        //                 }
+        //                 None => GENERIC_TYPE.into(),   // Unknown type, accept anything
+        //             }
+        //         };
+        //         let name = uri.to_name(root).to_string();
+        //         Ok(Renderable::Array(Array { name, tags, inner }))
+        //     }
+        //     Object => self.renderable_object(root, uri, map)
+        // }
+    }
+
+    // fn renderable_object(&self, root: &str, uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
+    //     let name = uri.to_name(root).to_string();
+
+    //     if let Some(anyarr) = self.any_of.as_ref() {
+    //         // we are going to make an enum
+    //         let variants : Result<Vec<_>> = anyarr.iter().enumerate().map(|(ix, any)| {
+    //             let uri = uri.join("anyOf").join(ix);
+    //             Ok(any.typename(root, &uri, true, map))
+    //         }).collect();
+    //         return Ok(Renderable::Enum(Enum::new(name, vec![], variants?)?))
+    //     }
+
+    //     if let Some(allarr) = self.all_of.as_ref() {
+    //         println!("ALL OF: {}", uri);
+    //         let merged_schema = merge_schemas(allarr, map)?;
+    //         return merged_schema.to_renderable(root, &uri, map)
+    //     }
+
+    //     let required_keys: HashSet<String> = self.required
+    //         .as_ref()
+    //         .map(|v| v.iter().map(|s| s.clone()).collect())
+    //         .unwrap_or(HashSet::new());
+    //     let fields = self.properties
+    //         .as_ref()
+    //         .unwrap_or(&Map::new())
+    //         .iter()
+    //         .map(|(name, schema)| {
+    //             let is_required = required_keys.contains(name);
+    //             let tags = vec![];
+    //             let type_ = schema.typename(root, uri, is_required, map);
+    //             Ok(Field::new(name.clone(), type_, tags)?)
+    //         })
+    //         .collect::<Result<Vec<Field>>>()?;
+    //     let tags = vec![];
+    //     Ok(Renderable::Struct(Struct::new(name, tags, fields)?))
+    // }
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -525,6 +552,16 @@ pub enum SchemaOrSchemas {
     Schema(Box<Schema>),
     Schemas(Schemas),
 }
+
+impl SchemaOrSchemas {
+    fn unwrap_or_bail(&self) -> Result<&Schema> {
+        match *self {
+            SchemaOrSchemas::Schema(ref schema) => Ok(schema),
+            _ => bail!("Multiple types not supported"),
+        }
+    }
+}
+
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -641,8 +678,15 @@ struct Field {
     tags: Vec<Tokens>,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Modifier {
+    Option,
+    Box,
+    Vec
+}
+
 impl Field {
-    fn new(name: String, type_: String, mut tags: Vec<Tokens>) -> Result<Field> {
+    fn new(name: String, modifiers: &Vec<Modifier>, type_: String, mut tags: Vec<Tokens>) -> Result<Field> {
         let snake = make_valid_identifier(name.to_snake_case())?;
         if name != snake {
             tags.push(quote!{
@@ -811,9 +855,9 @@ mod tests {
 
     #[test]
     fn test_uri_to_name() {
-        let id1 = Uri("#/this/is/some/route/my type".into());
+        let id1: Uri = "#/this/is/some/route/my type".into();
         assert_eq!(id1.to_name("root"), "MyType");
-        let id2 = Uri("#/some/other/route/1".into());
+        let id2: Uri = "#/some/other/route/1".into();
         assert_eq!(id2.to_name("root"), "RootSomeOtherRoute1");
     }
 
