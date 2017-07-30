@@ -211,16 +211,16 @@ impl Deref for Uri {
 
 impl Uri {
     fn identify(&self) -> Identified {
-        let redef = regex::Regex::new(r"/definitions/([^/]+)$").unwrap();
-        let reprop = regex::Regex::new(r"/properties/([^/]+)$").unwrap();
-        let reallof = regex::Regex::new(r"/allOf/\d+$").unwrap();
+        let re_def = regex::Regex::new(r"/definitions/([^/]+)$").unwrap();
+        let re_prop = regex::Regex::new(r"/properties/([^/]+)$").unwrap();
+        let re_allof = regex::Regex::new(r"/allOf/\d+$").unwrap();
         if self.deref() == "#" {
             Identified::Root
-        } else if let Some(c) = redef.captures(&*self) {
+        } else if let Some(c) = re_def.captures(&*self) {
             Identified::Definition(c.get(1).unwrap().as_str())
-        } else if let Some(c) = reprop.captures(&*self) {
+        } else if let Some(c) = re_prop.captures(&*self) {
             return Identified::Property(c.get(1).unwrap().as_str());
-        } else if reallof.is_match(&*self) {
+        } else if re_allof.is_match(&*self) {
             return Identified::AllOfEntry
         } else {
             Identified::Unknown
@@ -236,11 +236,7 @@ impl Uri {
     }
 
     fn is_all_of_entry(&self) -> bool {
-        if let Identified::AllOfEntry = self.identify() {
-            true
-        } else {
-            false
-        }
+        Identified::AllOfEntry == self.identify()
     }
 
     fn join<T: fmt::Display>(&self, next: T) -> Uri {
@@ -253,12 +249,14 @@ impl Uri {
             Definition(def) => def.to_pascal_case(),
             Property(prop) => format!("Property{}", prop.to_pascal_case()),
             Root => root.to_pascal_case(),
-            AllOfEntry | Unknown => (&*self).replace("/", " ").to_pascal_case(),
+            Unknown => (&*self).replace("/", " ").to_pascal_case(),
+            AllOfEntry => "XXX This should never be rendered".into()
         };
         make_valid_identifier(&name)
     }
 }
 
+#[derive(Copy, Clone, PartialEq)]
 enum Identified<'a> {
     Definition(&'a str),
     Property(&'a str),
