@@ -213,12 +213,15 @@ impl Uri {
     fn identify(&self) -> Identified {
         let redef = regex::Regex::new(r"/definitions/([^/]+)$").unwrap();
         let reprop = regex::Regex::new(r"/properties/([^/]+)$").unwrap();
+        let reallof = regex::Regex::new(r"/allOf/\d+$").unwrap();
         if self.deref() == "#" {
             Identified::Root
         } else if let Some(c) = redef.captures(&*self) {
             Identified::Definition(c.get(1).unwrap().as_str())
         } else if let Some(c) = reprop.captures(&*self) {
             return Identified::Property(c.get(1).unwrap().as_str());
+        } else if reallof.is_match(&*self) {
+            return Identified::AllOfEntry
         } else {
             Identified::Unknown
         }
@@ -226,6 +229,14 @@ impl Uri {
 
     fn is_definition(&self) -> bool {
         if let Identified::Definition(_) = self.identify() {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_all_of_entry(&self) -> bool {
+        if let Identified::AllOfEntry = self.identify() {
             true
         } else {
             false
@@ -242,7 +253,7 @@ impl Uri {
             Definition(def) => def.to_pascal_case(),
             Property(prop) => format!("Property{}", prop.to_pascal_case()),
             Root => root.to_pascal_case(),
-            Unknown => (&*self).replace("/", " ").to_pascal_case(),
+            AllOfEntry | Unknown => (&*self).replace("/", " ").to_pascal_case(),
         };
         make_valid_identifier(&name)
     }
@@ -252,6 +263,7 @@ enum Identified<'a> {
     Definition(&'a str),
     Property(&'a str),
     Root,
+    AllOfEntry,
     Unknown,
 }
 
@@ -305,61 +317,43 @@ impl Schema {
         } else if self.properties.is_some() {
             Ok(SchemaType::Object)
         } else {
-            //bail!("Failed to identify schema {}", self)
             Ok(SchemaType::Untyped) // Default assume object
         }
     }
 }
 
-fn merge_schemas(uris: &Vec<Uri>, map: &SchemaMap) -> Result<Schema> {
-    let mut all_props = Map::<Schema>::new();
-    let mut types = Vec::new();
-    let schemas = uris.iter()
-        .map(|uri| mapget(map, uri))
-        .collect::<Result<Vec<_>>>()?;
-    let _: () = schemas
-        .iter()
-        .map(|schema| {
-            let real_schema = schema.resolve(map)?;
-            if let Some(ref type_) = real_schema.schema.type_ {
-                types.push(type_.unwrap_or_bail()?)
-            };
-            real_schema
-                .schema
-                .properties
-                .as_ref()
-                .map(|map| {
-                    map.iter()
-                        .map(|(name, propschema)| match all_props.insert(
-                            name.clone(),
-                            propschema.clone(),
-                        ) {
-                            Some(_) => bail!("Duplicate key found: {}", name),
-                            None => Ok(()),
-                        })
-                        .collect::<Result<Vec<_>>>()
-                        .map(|_| ())
-                })
-                .unwrap_or(Ok(()))
+fn any_of(arrlen: usize, root: &str, uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
+    let mut fields = Vec::new();
+    (0..arrlen)
+        .map(|ix| uri.join(ix + 1))
+        .map(|uri| {
+            mapget(map, &uri)?
+            .resolve(map)?
+            .to_renderable(root, map)
+            .map(|renderable| match renderable {
+                Renderable::Struct(struct_) => {
+                    fields.extend(struct_.fields);
+                    Ok(())
+                }
+                _ => Err(ErrorKind::from("AnyOf members must be objects"))
+            })
         })
-        .collect::<Result<Vec<()>>>()
-        .map(|_| ())?;
-    let mut newschema: Schema = Default::default();
-    let type_ = {
-        let dedup: HashSet<_> = types.iter().collect();
-        match dedup.len() {
-            0 => SimpleType::Object,
-            1 => *types.first().unwrap(),
-            _ => bail!("Inconsistent types for allOf: {:?}", types),
-        }
-    };
-    newschema.type_ = Some(SimpleTypeOrSimpleTypes::SimpleType(type_));
-    newschema.properties = if all_props.len() > 0 {
-        Some(all_props)
-    } else {
-        None
-    };
-    Ok(newschema)
+        .collect::<Result<Vec<_>>>()?;
+    {
+        let mut fieldcheck = HashSet::new();
+        fields.iter().map(|field| if !fieldcheck.insert(&field.name) {
+            bail!("anyOf duplicate field '{}' for {}", field.name, uri)
+        } else {
+            Ok(())
+        }).collect::<Result<Vec<_>>>()?;
+    }
+    let name = uri.to_type_name(root)?;
+    let tags = vec![];
+    Ok(Renderable::Struct(
+        Struct::new(name, tags, fields).chain_err(|| {
+            format!("Failed to create struct at uri {}", uri)
+        })?
+    ))
 }
 
 fn gather_definitions_map(
@@ -446,6 +440,8 @@ fn collect_renderable_definitions(map: &SchemaMap) -> Vec<&MetaSchema> {
         .filter(|metaschema| {
             if metaschema.uri.is_definition() {
                 true // always create regardless of content
+            } else if metaschema.uri.is_all_of_entry() {
+                false //  not a complete schema
             } else {
                 use SchemaType::*;
                 match metaschema.schema_type {
@@ -565,11 +561,9 @@ impl MetaSchema {
                 any_or_one_of(arrlen, root, &uri, map)
             }
             AllOf => {
-                let all_of_uri = self.uri.join("allOf");
-                let allarrlen = self.schema.all_of.as_ref().unwrap().len();
-                let uris = (0..allarrlen).map(|ix| all_of_uri.join(ix + 1)).collect();
-                let merged = MetaSchema::from_schema(all_of_uri, merge_schemas(&uris, map)?)?;
-                merged.to_renderable(root, map)
+                let arrlen = self.schema.all_of.as_ref().unwrap().len();
+                let uri = self.uri.join("allOf");
+                any_of(arrlen, root, &uri, map)
             }
             Enum => unimplemented!(),
             Object => self.renderable_object(root, map),
@@ -577,12 +571,6 @@ impl MetaSchema {
     }
 
     fn renderable_object(&self, root: &str, map: &SchemaMap) -> Result<Renderable> {
-
-        // if let Some(allarr) = self.all_of.as_ref() {
-        //     let merged_schema = merge_schemas(allarr, map)?;
-        //     return merged_schema.to_renderable(root, &uri, map)
-        // }
-
         let required_keys: HashSet<String> = self.schema
             .required
             .as_ref()
@@ -970,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn test_uri_to_name() {
+    fn test_uri_to_type_name() {
         let id1: Uri = "#/this/is/some/route/my type".into();
         assert_eq!(id1.to_type_name("root").unwrap(), "ThisIsSomeRouteMyType");
         let id2: Uri = "#/properties/aProp".into();

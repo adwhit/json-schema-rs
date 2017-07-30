@@ -58,7 +58,8 @@ definitions:
   or pick from these:
     oneOf:
       - type: integer
-      - type: array    # TODO This doesn't work
+      - type: number
+      #- type: array    # TODO This doesn't work
 
   combine these:
     allOf:
