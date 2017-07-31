@@ -40,10 +40,10 @@ pub struct Schema {
     pub enum_: Option<Vec<serde_json::Value>>,
     #[serde(rename = "exclusiveMaximum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_maximum: Option<bool>,
+    pub exclusive_maximum: Option<i64>,
     #[serde(rename = "exclusiveMinimum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_minimum: Option<bool>,
+    pub exclusive_minimum: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

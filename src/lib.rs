@@ -150,8 +150,10 @@ impl Uri {
         use Identified::*;
         let name = match self.identify() {
             Definition(def) => def.to_pascal_case(),
-            Property(prop) => format!("{}Type", prop.to_pascal_case()),
             Root => root.to_pascal_case(),
+            Property(prop) => format!("{}{}",
+                                      self.strip_right().strip_right().to_type_name(root)?,
+                                      prop.to_pascal_case()),
             AllOfEntry => "XXX This should never be rendered".into(),
             AnyOf | OneOf => return self.strip_right().to_type_name(root),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
@@ -212,7 +214,7 @@ impl Schema {
         } else if self.all_of.is_some() {
             Ok(SchemaType::AllOf)
         } else if let Some(ref st) = self.type_ {
-            let st = st.unwrap_or_bail()?;
+            let st = st.unwrap_or_bail().chain_err(|| format!("Failed to get schema type for {:?}", st))?;
             match st {
                 Boolean | Integer | Null | Number | String => Ok(SchemaType::Primitive(st)),
                 Array => Ok(SchemaType::Array),
@@ -581,6 +583,8 @@ impl ToTokens for Renderable {
     }
 }
 
+
+
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize, new)]
 struct TypeName {
     base: String,
@@ -882,7 +886,7 @@ mod tests {
 
     #[test]
     fn test_meta_schema() {
-        let root = RootSchema::from_file_yaml("test_schemas/metaschema-draft4.json").unwrap();
+        let root = RootSchema::from_file_yaml("test_schemas/metaschema.json").unwrap();
         root.generate("Schema").unwrap();
     }
 }
