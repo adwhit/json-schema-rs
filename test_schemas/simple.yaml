@@ -59,7 +59,7 @@ definitions:
     oneOf:
       - type: integer
       - type: number
-      #- type: array    # TODO This doesn't work
+      - type: array    # TODO This doesn't work
 
   combine these:
     allOf:

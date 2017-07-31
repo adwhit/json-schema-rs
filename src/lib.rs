@@ -46,7 +46,8 @@ lazy_static! {
     };
 }
 
-const GENERIC_TYPE: &str = "serde_json::Value";
+const GENERIC_TYPE: &str = "JsonValue";
+const HEADER: &str = "use ::serde_json::Value as JsonValue;";
 
 pub type PositiveInteger = i64;
 pub type PositiveIntegerDefault0 = serde_json::Value;
@@ -214,14 +215,20 @@ impl Uri {
         let re_def = regex::Regex::new(r"/definitions/([^/]+)$").unwrap();
         let re_prop = regex::Regex::new(r"/properties/([^/]+)$").unwrap();
         let re_allof = regex::Regex::new(r"/allOf/\d+$").unwrap();
+        let re_anyof = regex::Regex::new(r"/anyOf$").unwrap();
+        let re_oneof = regex::Regex::new(r"/oneOf$").unwrap();
         if self.deref() == "#" {
             Identified::Root
         } else if let Some(c) = re_def.captures(&*self) {
             Identified::Definition(c.get(1).unwrap().as_str())
         } else if let Some(c) = re_prop.captures(&*self) {
             return Identified::Property(c.get(1).unwrap().as_str());
+        } else if re_anyof.is_match(&*self) {
+            return Identified::AnyOf;
+        } else if re_oneof.is_match(&*self) {
+            return Identified::OneOf;
         } else if re_allof.is_match(&*self) {
-            return Identified::AllOfEntry
+            return Identified::AllOfEntry;
         } else {
             Identified::Unknown
         }
@@ -243,14 +250,24 @@ impl Uri {
         Uri(format!("{}/{}", self, next))
     }
 
+    fn strip_right(&self) -> Uri {
+        if let Some(n) = self.0.rfind('/') {
+            let (left, _) = self.0.split_at(n);
+            Uri::from(left)
+        } else {
+            self.clone()
+        }
+    }
+
     fn to_type_name(&self, root: &str) -> Result<String> {
         use Identified::*;
         let name = match self.identify() {
             Definition(def) => def.to_pascal_case(),
-            Property(prop) => format!("Property{}", prop.to_pascal_case()),
+            Property(prop) => format!("{}Type", prop.to_pascal_case()),
             Root => root.to_pascal_case(),
+            AllOfEntry => "XXX This should never be rendered".into(),
+            AnyOf | OneOf => return self.strip_right().to_type_name(root),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
-            AllOfEntry => "XXX This should never be rendered".into()
         };
         make_valid_identifier(&name)
     }
@@ -262,6 +279,8 @@ enum Identified<'a> {
     Property(&'a str),
     Root,
     AllOfEntry,
+    AnyOf,
+    OneOf,
     Unknown,
 }
 
@@ -326,32 +345,31 @@ fn any_of(arrlen: usize, root: &str, uri: &Uri, map: &SchemaMap) -> Result<Rende
         .map(|ix| uri.join(ix + 1))
         .map(|uri| {
             mapget(map, &uri)?
-            .resolve(map)?
-            .to_renderable(root, map)
-            .map(|renderable| match renderable {
-                Renderable::Struct(struct_) => {
-                    fields.extend(struct_.fields);
-                    Ok(())
-                }
-                _ => Err(ErrorKind::from("AnyOf members must be objects"))
-            })
+                .resolve(map)?
+                .to_renderable(root, map)
+                .map(|renderable| match renderable {
+                    Renderable::Struct(struct_) => {
+                        fields.extend(struct_.fields);
+                        Ok(())
+                    }
+                    _ => Err(ErrorKind::from("AnyOf members must be objects")),
+                })
         })
         .collect::<Result<Vec<_>>>()?;
     {
         let mut fieldcheck = HashSet::new();
-        fields.iter().map(|field| if !fieldcheck.insert(&field.name) {
-            bail!("anyOf duplicate field '{}' for {}", field.name, uri)
-        } else {
-            Ok(())
-        }).collect::<Result<Vec<_>>>()?;
+        fields
+            .iter()
+            .map(|field| if !fieldcheck.insert(&field.name) {
+                bail!("anyOf duplicate field '{}' for {}", field.name, uri)
+            } else {
+                Ok(())
+            })
+            .collect::<Result<Vec<_>>>()?;
     }
     let name = uri.to_type_name(root)?;
     let tags = vec![];
-    Ok(Renderable::Struct(
-        Struct::new(name, tags, fields).chain_err(|| {
-            format!("Failed to create struct at uri {}", uri)
-        })?
-    ))
+    Ok(Renderable::Struct(Struct::new(name, tags, fields)))
 }
 
 fn gather_definitions_map(
@@ -508,7 +526,7 @@ impl MetaSchema {
             }
             Object => Ok(TypeName::new(self.uri.to_type_name(root)?, mods)),
             Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
-            _ => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
+            _ => Ok(TypeName::new(self.uri.to_type_name(root)?, mods)),
         }
     }
 
@@ -528,7 +546,7 @@ impl MetaSchema {
             uri: &Uri,
             map: &SchemaMap,
         ) -> Result<Renderable> {
-            // we are going to make an enum
+            // we are going to make an union
             let name = uri.to_type_name(root)?;
             let variants = (0..arrlen)
                 .map(|ix| {
@@ -536,10 +554,10 @@ impl MetaSchema {
                     mapget(map, &uri).and_then(|elem| Ok(elem.typename(root, true, map)?))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            return Ok(Renderable::Enum(EnumStruct::new(name, vec![], variants)?));
+            return Ok(Renderable::Union(Union::new(name, vec![], variants)?));
         }
 
-        use Enum as EnumStruct;
+        use Enum as EnumType;
         use SchemaType::*;
         match self.schema_type {
             Primitive(_) | Reference(_) | Array | Untyped => {
@@ -563,7 +581,20 @@ impl MetaSchema {
                 let uri = self.uri.join("allOf");
                 any_of(arrlen, root, &uri, map)
             }
-            Enum => unimplemented!(),
+            Enum => {
+                let enumvals = self.schema.enum_.as_ref().unwrap();
+                let variants = enumvals
+                    .iter()
+                    .map(|val| {
+                        val.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                            "Non-string enumerations not supported".into()
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let name = self.uri.to_type_name(root)?;
+                Ok(Renderable::Enum(EnumType::new(name, vec![], variants)?))
+
+            }
             Object => self.renderable_object(root, map),
         }
     }
@@ -594,11 +625,7 @@ impl MetaSchema {
             .collect::<Result<Vec<Field>>>()?;
         let name = self.uri.to_type_name(root)?;
         let tags = vec![];
-        Ok(Renderable::Struct(
-            Struct::new(name, tags, fields).chain_err(|| {
-                format!("Failed to create struct at uri {}", self.uri)
-            })?,
-        ))
+        Ok(Renderable::Struct(Struct::new(name, tags, fields)))
     }
 }
 
@@ -638,25 +665,6 @@ pub enum BoolOrSchema {
     Schema(Box<Schema>),
 }
 
-// TODO could remove this and just use Box<ToTokens>
-#[derive(Clone, PartialEq, Debug)]
-enum Renderable {
-    Alias(Alias),
-    Enum(Enum),
-    Struct(Struct),
-}
-
-impl ToTokens for Renderable {
-    fn to_tokens(&self, tokens: &mut Tokens) {
-        use Renderable::*;
-        match *self {
-            Alias(ref elem) => elem.to_tokens(tokens),
-            Enum(ref elem) => elem.to_tokens(tokens),
-            Struct(ref elem) => elem.to_tokens(tokens),
-        }
-    }
-}
-
 fn make_valid_identifier(s: &str) -> Result<String> {
     // strip out invalid characters and ensure result is valid
     // bit ugly to reallocate but at least it is simple
@@ -688,37 +696,51 @@ fn make_valid_identifier(s: &str) -> Result<String> {
     Ok(out)
 }
 
+// TODO could remove this and just use Box<ToTokens>
+#[derive(Clone, PartialEq, Debug)]
+enum Renderable {
+    Alias(Alias),
+    Union(Union),
+    Struct(Struct),
+    Enum(Enum),
+}
+
+impl ToTokens for Renderable {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        use Renderable::*;
+        match *self {
+            Alias(ref elem) => elem.to_tokens(tokens),
+            Union(ref elem) => elem.to_tokens(tokens),
+            Struct(ref elem) => elem.to_tokens(tokens),
+            Enum(ref elem) => elem.to_tokens(tokens),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize, new)]
 struct TypeName {
     base: String,
     modifiers: Vec<Modifier>,
 }
 
-impl ToTokens for TypeName {
-    fn to_tokens(&self, tokens: &mut Tokens) {
+impl TypeName {
+    fn apply_modifiers(&self) -> String {
         use Modifier::*;
-        let base = Ident::new(&*self.base);
-        let mut tok = quote!{ #base };
+        let mut base = self.base.clone();
         for modifier in &self.modifiers {
-            tok = match *modifier {
-                Option => {
-                    quote! {
-                        Option<#tok>
-                    }
-                }
-                Box => {
-                    quote! {
-                        Box<#tok>
-                    }
-                }
-                Vec => {
-                    quote! {
-                        Vec<#tok>
-                    }
-                }
+            base = match *modifier {
+                Option => format!("Option<{}>", base),
+                Box => format!("Box<{}>", base),
+                Vec => format!("Vec<{}>", base),
             };
         }
-        tokens.append(tok)
+        base
+    }
+}
+
+impl ToTokens for TypeName {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        tokens.append(Ident::new(self.apply_modifiers()))
     }
 }
 
@@ -737,12 +759,12 @@ pub struct Struct {
 }
 
 impl Struct {
-    fn new(name: String, mut tags: Vec<Tokens>, fields: Vec<Field>) -> Result<Struct> {
-        let name = make_valid_identifier(&name.to_pascal_case())?;
+    fn new(name: String, mut tags: Vec<Tokens>, fields: Vec<Field>) -> Struct {
+        let name = name.to_pascal_case();
         tags.push(quote! {
-            #[derive(Debug, Clone, Default, PartialEq)]
+            #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
         });
-        Ok(Struct { name, tags, fields })
+        Struct { name, tags, fields }
     }
 }
 
@@ -756,7 +778,6 @@ impl ToTokens for Struct {
             #(#tags),*
             pub struct #name {
                 #(#fields),*
-
             }
         };
         tokens.append(tok)
@@ -801,23 +822,22 @@ impl ToTokens for Field {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-struct Enum {
+struct Union {
     name: String,
     tags: Vec<Tokens>,
-    variants: Vec<(TypeName, TypeName)>,
+    variants: Vec<(Ident, TypeName)>,
 }
 
-impl Enum {
-    fn new(name: String, tags: Vec<Tokens>, variants: Vec<TypeName>) -> Result<Enum> {
+impl Union {
+    fn new(name: String, tags: Vec<Tokens>, variants: Vec<TypeName>) -> Result<Union> {
         let variants = variants
             .into_iter()
-            .map(|v| {
-                let mut vpascal = v.clone();
-                vpascal.base = vpascal.base.to_pascal_case();
-                (vpascal, v)
+            .map(|right| {
+                let left = make_valid_identifier(&right.apply_modifiers().to_pascal_case())?;
+                Ok((Ident::from(left), right))
             })
-            .collect();
-        Ok(Enum {
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Union {
             name,
             tags,
             variants,
@@ -825,7 +845,7 @@ impl Enum {
     }
 }
 
-impl ToTokens for Enum {
+impl ToTokens for Union {
     fn to_tokens(&self, tokens: &mut Tokens) {
         let name = Ident::new(&*self.name);
         let tags = &self.tags;
@@ -873,13 +893,69 @@ impl ToTokens for Alias {
     }
 }
 
+#[derive(Clone, PartialEq, Debug)]
+struct Enum {
+    name: String,
+    tags: Vec<Tokens>,
+    variants: Vec<(Ident, Vec<Tokens>)>,
+}
+
+impl Enum {
+    fn new(name: String, tags: Vec<Tokens>, variants: Vec<String>) -> Result<Enum> {
+        let variants = variants
+            .iter()
+            .map(|variant| {
+                let mut tags = Vec::new();
+                let validname = make_valid_identifier(&variant.to_pascal_case())?;
+                if *variant != validname {
+                    tags.push(quote!{
+                        #[serde(rename = #variant)]
+                    });
+                }
+                Ok((Ident::from(validname), tags))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Enum {
+            name,
+            tags,
+            variants,
+        })
+    }
+}
+
+impl ToTokens for Enum {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        let name = Ident::from(&*self.name);
+        let vars: Vec<_> = self.variants
+            .iter()
+            .map(|v| {
+                let name = &v.0;
+                let tags = &v.1;
+                quote! {
+                #(#tags),*
+                #name
+            }
+            })
+            .collect();
+        let tok =
+            quote! {
+            pub enum #name {
+                #(#vars),*
+            }
+        };
+        tokens.append(tok);
+    }
+}
+
 fn beautify(t: Tokens) -> Result<String> {
     use rustfmt::*;
 
     // FIXME workaround is necessary until rustfmt works programmatically
-    let tmppath = "/tmp/rustfmt.rs"; // TODO use tempdir
+    //let tmppath = "/tmp/rustfmt.rs"; // TODO use tempdir
+    let tmppath = "/home/alex/scratch/stubgen/src/gen.rs"; // TODO use tempdir
     {
         let mut tmp = File::create(tmppath)?;
+        writeln!(tmp, "{}", HEADER)?;
         tmp.write_all(t.as_str().as_bytes())?;
     }
 
@@ -900,40 +976,6 @@ fn beautify(t: Tokens) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn metaschema() -> RootSchema {
-        RootSchema::from_file_json("test_schemas/metaschema-draft4.json").unwrap()
-        //RootSchema::from_file_yaml("test_schemas/openapi3-schema.yaml").unwrap()
-    }
-
-    #[test]
-    fn load_openapi3_schema() {
-        RootSchema::from_file_yaml("test_schemas/openapi3-schema.yaml").unwrap();
-    }
-
-    #[test]
-    fn load_meta_schema() {
-        RootSchema::from_file_json("test_schemas/metaschema-draft4.json").unwrap();
-    }
-
-    #[test]
-    fn gather_schemas() {
-        let root = metaschema();
-        let map = root.gather_definitions().unwrap();
-        assert_eq!(map.len(), 51)
-    }
-
-    #[test]
-    fn test_gather_renderables() {
-        let root = metaschema();
-        root.renderables("root").unwrap();
-    }
-
-    #[test]
-    fn test_generate() {
-        let root = metaschema();
-        let _code = root.generate("root").unwrap();
-    }
 
     #[test]
     fn test_make_valid_identifier() {
@@ -971,6 +1013,12 @@ mod tests {
     #[test]
     fn test_simple_schema() {
         let root = RootSchema::from_file_yaml("test_schemas/simple.yaml").unwrap();
-        root.generate("Test").unwrap();
+        root.generate("TestSimple").unwrap();
+    }
+
+    #[test]
+    fn test_meta_schema() {
+        let root = RootSchema::from_file_yaml("test_schemas/metaschema-draft4.json").unwrap();
+        root.generate("Schema").unwrap();
     }
 }
