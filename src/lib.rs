@@ -159,46 +159,20 @@ enum Identified<'a> {
 }
 
 impl Schema {
-    /// find every instance in which a schema is defined or referenced
-    // fn gather_definitions(&self, uri: &Uri, map: &mut SchemaMap) -> Result<()> {
-    //     // TODO: This is a full recursive clone. Would be nice to replace
-    //     // all Schema instances with URIs
-    //     let meta = self.identify(uri, map)?;
-    //     if map.insert(uri.clone(), meta).is_some() {
-    //         bail!("Schema already exists at location {}", uri)
-    //     };
-    //     if let Some(definitions) = self.definitions {
-    //         gather_definitions_map(definitions, uri.join("definitions"), map)?;
-    //     }
-    //     if let Some(pattern_props) = self.pattern_properties {
-    //         gather_definitions_map(
-    //             pattern_props,
-    //             uri.join("patternProperties"),
-    //             map)?
-    //     }
-    //     if let Some(ref schema) = self.not {
-    //         schema.gather_definitions(&uri.join("not"), map)?
-    //     }
-    //     if let Some(SchemaOrSchemas::Schema(ref schema)) = self.items {
-    //         schema.gather_definitions(&uri.join("items"), map)?
-    //     }
-    //     Ok(())
-    // }
-
-    fn identify_and_gather(&self, uri: &Uri, map: &mut SchemaMap) -> Result<MetaSchema> {
+    fn identify_and_gather(&self, uri: Uri, root: &str, map: &mut SchemaMap) -> Result<()> {
         use MetaSchema::*;
         let meta = if let Some(ref_) = self.ref_.as_ref() {
-           Reference(ref_.as_str().into())
+           Reference(ref_.as_str().into().set_root(root))
         } else if let Some(ref enums) = self.enum_ {
             unimplemented!()
         } else if let Some(ref schemas) = self.any_of {
-            let uris = gather_definitions_vec(schemas, uri.join("anyOf"), map)?;
+            let uris = gather_definitions_vec(schemas, &uri.join("anyOf"), root, map)?;
             AnyOf(uris)
         } else if let Some(ref schemas) = self.one_of {
-            let uris = gather_definitions_vec(schemas, uri.join("oneOf"), map)?;
+            let uris = gather_definitions_vec(schemas, &uri.join("oneOf"), root, map)?;
             OneOf(uris)
         } else if let Some(ref schemas) = self.all_of {
-            let uris = gather_definitions_vec(schemas, uri.join("allOf"), map)?;
+            let uris = gather_definitions_vec(schemas, &uri.join("allOf"), root, map)?;
             AllOf(uris)
         } else if let Some(ref st) = self.type_ {
             let st = st.unwrap_or_bail().chain_err(|| format!("Failed to get schema type for {:?}", st))?;
@@ -224,12 +198,15 @@ impl Schema {
                 .as_ref()
                 .map(|v| v.iter().map(|s| s.clone()).collect())
                 .unwrap_or(HashSet::new());
-            let fields = gather_definitions_map(&props, uri.join("properties"), map)?;
+            let fields = gather_definitions_map(&props, &uri.join("properties"), root, map)?;
             Object{required, fields}
         } else {
             Untyped // Default assume object
         };
-        Ok(meta)
+        if map.insert(uri, meta).is_some() {
+            bail!("Uri {} already present in schema map", uri)
+        }
+        Ok(())
     }
 }
 
@@ -267,30 +244,35 @@ fn all_of(uris: &[Uri] , root: &str, uri: &Uri, map: &SchemaMap) -> Result<Rende
 
 fn gather_definitions_map(
     schema_map: &Map<Schema>,
-    uri: Uri,
+    uri: &Uri,
+    root: &str,
     map: &mut SchemaMap,
 ) -> Result<Map<Uri>> {
     schema_map.iter().map(|(name, schema)| {
         let uri = uri.join(name);
-        schema.identify_and_gather(&uri, map)?;
+        schema.identify_and_gather(uri.clone(), root, map)?;
         Ok((name.clone(), uri))
     }).collect::<Result<BTreeMap<String, Uri>>>()
 }
 
 fn gather_definitions_vec(
     schemas: &SchemaArray,
-    uri: Uri,
+    uri: &Uri,
+    root: &str,
     map: &mut SchemaMap,
 ) -> Result<Vec<Uri>> {
     schemas.iter().enumerate().map(|(ix, schema)| {
         let uri = uri.join(ix + 1);
-        schema.identify_and_gather(&uri, map)?;
+        schema.identify_and_gather(uri.clone(), root, map)?;
         Ok(uri)
     }).collect::<Result<Vec<_>>>()
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
-pub struct RootSchema(Schema);
+pub struct RootSchema {
+    name: String,
+    schema: Schema
+}
 
 impl RootSchema {
     pub fn from_reader_yaml<R: Read>(reader: R) -> Result<RootSchema> {
@@ -311,7 +293,7 @@ impl RootSchema {
 
     fn gather_definitions(&self) -> Result<SchemaMap> {
         let mut map = SchemaMap::new();
-        self.0.identify_and_gather(&"#".into(), &mut map)?;
+        self.schema.identify_and_gather(self.name.into(), &self.name, &mut map)?;
         Ok(map)
     }
 
