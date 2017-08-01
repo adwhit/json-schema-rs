@@ -62,12 +62,6 @@ impl fmt::Display for Schema {
 #[derive(Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord, Deserialize, Serialize)]
 struct Uri(String);
 
-impl<'a> From<&'a str> for Uri {
-    fn from(s: &str) -> Uri {
-        Uri(s.into())
-    }
-}
-
 impl fmt::Display for Uri {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -83,13 +77,24 @@ impl Deref for Uri {
 }
 
 impl Uri {
+    fn new(root: &str, path: &str) -> Uri {
+        if path == "#" {
+            Uri(root.to_string())
+        } else if path.starts_with("#/") {
+            let (_, right) = path.split_at(2);
+            Uri(format!("{}/{}", root, path))
+        } else {
+            Uri(path.into())
+        }
+    }
+
     fn identify(&self) -> Identified {
         let re_def = regex::Regex::new(r"/definitions/([^/]+)$").unwrap();
         let re_prop = regex::Regex::new(r"/properties/([^/]+)$").unwrap();
         let re_allof = regex::Regex::new(r"/allOf/\d+$").unwrap();
         let re_anyof = regex::Regex::new(r"/anyOf$").unwrap();
         let re_oneof = regex::Regex::new(r"/oneOf$").unwrap();
-        if self.deref() == "#" {
+        if self.deref().find('/').is_none() {
             Identified::Root
         } else if let Some(c) = re_def.captures(&*self) {
             Identified::Definition(c.get(1).unwrap().as_str())
@@ -125,22 +130,22 @@ impl Uri {
     fn strip_right(&self) -> Uri {
         if let Some(n) = self.0.rfind('/') {
             let (left, _) = self.0.split_at(n);
-            Uri::from(left)
+            Uri(left.into())
         } else {
             self.clone()
         }
     }
 
-    fn to_type_name(&self, root: &str) -> Result<String> {
+    fn to_type_name(&self) -> Result<String> {
         use Identified::*;
         let name = match self.identify() {
             Definition(def) => def.to_pascal_case(),
-            Root => root.to_pascal_case(),
+            Root => self.0.to_pascal_case(),
             Property(prop) => format!("{}{}",
-                                      self.strip_right().strip_right().to_type_name(root)?,
+                                      self.strip_right().strip_right().to_type_name()?,
                                       prop.to_pascal_case()),
             AllOfEntry => "XXX This should never be rendered".into(),
-            AnyOf | OneOf => return self.strip_right().to_type_name(root),
+            AnyOf | OneOf => return self.strip_right().to_type_name(),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
         };
         make_valid_identifier(&name)
@@ -162,7 +167,7 @@ impl Schema {
     fn identify_and_gather(&self, uri: Uri, root: &str, map: &mut SchemaMap) -> Result<()> {
         use MetaSchema::*;
         let meta = if let Some(ref_) = self.ref_.as_ref() {
-           Reference(ref_.as_str().into().set_root(root))
+           Reference(Uri::new(root, ref_))
         } else if let Some(ref enums) = self.enum_ {
             unimplemented!()
         } else if let Some(ref schemas) = self.any_of {
@@ -203,20 +208,20 @@ impl Schema {
         } else {
             Untyped // Default assume object
         };
-        if map.insert(uri, meta).is_some() {
+        if map.insert(uri.clone(), meta).is_some() {
             bail!("Uri {} already present in schema map", uri)
         }
         Ok(())
     }
 }
 
-fn all_of(uris: &[Uri] , root: &str, uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
+fn render_all_of(uris: &[Uri] , uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
     let mut fields = Vec::new();
     uris.iter()
         .map(|uri| {
             mapget(map, &uri)?
                 .resolve(map)?
-                .to_renderable(&uri, root, map)
+                .to_renderable(&uri, map)
                 .map(|renderable| match renderable {
                     Renderable::Struct(struct_) => {
                         fields.extend(struct_.fields);
@@ -237,7 +242,7 @@ fn all_of(uris: &[Uri] , root: &str, uri: &Uri, map: &SchemaMap) -> Result<Rende
             })
             .collect::<Result<Vec<_>>>()?;
     }
-    let name = uri.to_type_name(root)?;
+    let name = uri.to_type_name()?;
     let tags = vec![];
     Ok(Renderable::Struct(Struct::new(name, tags, fields)))
 }
@@ -293,7 +298,8 @@ impl RootSchema {
 
     fn gather_definitions(&self) -> Result<SchemaMap> {
         let mut map = SchemaMap::new();
-        self.schema.identify_and_gather(self.name.into(), &self.name, &mut map)?;
+        let uri = Uri::new(&self.name, "#");
+        self.schema.identify_and_gather(uri, &self.name, &mut map)?;
         Ok(map)
     }
 
@@ -302,7 +308,7 @@ impl RootSchema {
         let defns = collect_renderable_definitions(&map);
         defns
             .iter()
-            .map(|&(uri, metaschema)| metaschema.to_renderable(uri, root, &map))
+            .map(|&(uri, metaschema)| metaschema.to_renderable(uri, &map))
             .collect()
     }
 
@@ -392,13 +398,13 @@ impl MetaSchema {
         }
     }
 
-    fn to_renderable(&self, uri: &Uri, root: &str, map: &SchemaMap) -> Result<Renderable> {
+    fn to_renderable(&self, uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
         use Enum as EnumType;
         use MetaSchema::*;
         match *self {
             Primitive(_) | Reference(_) | Array(_) | Untyped => {
-                let name = uri.to_type_name(root)?;
-                let inner = typedef_name(uri, self, root, true, map)?;
+                let name = uri.to_type_name()?;
+                let inner = typedef_name(uri, self, true, map)?;
                 let tags = vec![];
                 Ok(Renderable::Alias(Alias::new(name, inner, tags)))
             }
@@ -413,26 +419,26 @@ impl MetaSchema {
             }
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
-                all_of(uris, root, &uri, map)
+                render_all_of(uris, &uri, map)
             }
             Enum(ref variants) => {
                 unimplemented!()
                 // let name = uri.to_type_name(root)?;
                 // Ok(Renderable::Enum(EnumType::new(name, vec![], variants)?))
             }
-            Object{ref required, ref fields} => renderable_object(uri, required, fields, root, map),
+            Object{ref required, ref fields} => renderable_object(uri, required, fields, map),
         }
     }
 
 }
 
-fn renderable_object(uri: &Uri, required_keys: &HashSet<String>, field_map: &Map<Uri>, root: &str, map: &SchemaMap) -> Result<Renderable> {
+fn renderable_object(uri: &Uri, required_keys: &HashSet<String>, field_map: &Map<Uri>, map: &SchemaMap) -> Result<Renderable> {
     let fields = field_map.iter()
         .map(|(field_name, uri)| {
             let metaschema = mapget(map, &uri)?;
             let is_required = required_keys.contains(field_name);
             let tags = vec![];
-            let typename = typedef_name(uri, metaschema, root, is_required, map)?;
+            let typename = typedef_name(uri, metaschema, is_required, map)?;
             Ok(Field::new(field_name.clone(), typename, tags).chain_err(
                 || {
                     format!("Failed to create field {} at uri {}", field_name, uri)
@@ -440,7 +446,7 @@ fn renderable_object(uri: &Uri, required_keys: &HashSet<String>, field_map: &Map
             )?)
         })
         .collect::<Result<Vec<Field>>>()?;
-    let name = uri.to_type_name(root)?;
+    let name = uri.to_type_name()?;
     let tags = vec![];
     Ok(Renderable::Struct(Struct::new(name, tags, fields)))
 }
@@ -451,7 +457,7 @@ fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
     })
 }
 
-fn typedef_name(uri: &Uri, meta: &MetaSchema, root: &str, required: bool, map: &SchemaMap) -> Result<TypeName> {
+fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<TypeName> {
     let mut mods = Vec::new();
     if !required {
         mods.push(Modifier::Option)
@@ -459,14 +465,14 @@ fn typedef_name(uri: &Uri, meta: &MetaSchema, root: &str, required: bool, map: &
     use MetaSchema::*;
     match *meta {
         Reference(ref uri) => {
-            mapget(map, uri).and_then(|deref| typedef_name(uri, deref, root, required, map))
+            mapget(map, uri).and_then(|deref| typedef_name(uri, deref, required, map))
         }
         Primitive(prim) => Ok(TypeName::new(prim.native().into(), mods)),
         Array(ref items_uri) => {
             mods.insert(0, Modifier::Vec);
             mapget(map, items_uri)
                 .map(|metaschema| {
-                    typedef_name(items_uri, metaschema, root, true, map).map(|mut typename| {
+                    typedef_name(items_uri, metaschema, true, map).map(|mut typename| {
                         typename.modifiers.extend(&mods);
                         typename
                     })
@@ -474,7 +480,7 @@ fn typedef_name(uri: &Uri, meta: &MetaSchema, root: &str, required: bool, map: &
                 .unwrap_or(Ok(TypeName::new(GENERIC_TYPE.into(), mods)))
         }
         Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
-        Object{..} | _ => Ok(TypeName::new(uri.to_type_name(root)?, mods)),
+        Object{..} | _ => Ok(TypeName::new(uri.to_type_name()?, mods)),
     }
 }
 
@@ -823,12 +829,12 @@ mod tests {
 
     #[test]
     fn test_uri_to_type_name() {
-        let id1: Uri = "#/this/is/some/route/my type".into();
-        assert_eq!(id1.to_type_name("root").unwrap(), "ThisIsSomeRouteMyType");
-        let id2: Uri = "#/properties/aProp".into();
-        assert_eq!(id2.to_type_name("root").unwrap(), "PropertyAprop");
-        let id3: Uri = "#".into();
-        assert_eq!(id3.to_type_name("root").unwrap(), "Root");
+        let id1 = Uri::new("root", "#/this/is/some/route/my type");
+        assert_eq!(id1.to_type_name().unwrap(), "RootThisIsSomeRouteMyType");
+        let id2 = Uri::new("root", "#/properties/aProp");
+        assert_eq!(id2.to_type_name().unwrap(), "RootAprop");
+        let id3 = Uri::new("root", "#");
+        assert_eq!(id3.to_type_name().unwrap(), "Root");
         // TODO make this work
         // let id4: Uri = "#more".into();
         // assert_eq!(id3.to_name("root"), "More");
