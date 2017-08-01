@@ -176,7 +176,15 @@ impl Schema {
         let meta = if let Some(ref_) = self.ref_.as_ref() {
             Reference(Uri::new(root, ref_))
         } else if let Some(ref enums) = self.enum_ {
-            unimplemented!()
+            let variants = enums
+                .iter()
+                .map(|enm| {
+                    enm.as_str()
+                        .ok_or(ErrorKind::from("enum items must be strings").into())
+                        .map(|name| Variant::new(name.to_string(), None))
+                })
+                .collect::<Result<Vec<Variant>>>()?;
+            Enum(variants)
         } else if let Some(ref schemas) = self.any_of {
             let uris = gather_definitions_vec(schemas, &uri.join("anyOf"), root, map)?;
             AnyOf(uris)
@@ -351,7 +359,7 @@ impl RootSchema {
     pub fn generate(&self) -> Result<String> {
         let renderables = self.make_renderables()?;
         let tokens = render_all(&renderables);
-        beautify(tokens)
+        rust_format(tokens)
     }
 }
 
@@ -406,7 +414,7 @@ impl Primitive {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug)]
 enum MetaSchema {
     Reference(Uri),
     Primitive(Primitive),
@@ -420,12 +428,6 @@ enum MetaSchema {
         fields: Map<Uri>,
     },
     Untyped,
-}
-
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-struct Variant {
-    name: String,
-    type_: Option<Uri>,
 }
 
 impl MetaSchema {
@@ -448,22 +450,26 @@ impl MetaSchema {
                 Ok(Renderable::Alias(Alias::new(name, inner, tags)))
             }
             AnyOf(ref uris) | OneOf(ref uris) => {
-                // let name = uri.to_type_name(root)?;
-                // let variants = uris.iter().map(|uri| mapget(map, &uri)
-                //                 .and_then(|elem| Ok(elem.typename(root, true, map)?))
-                //     )
-                //     .collect::<Result<Vec<_>>>()?;
-                // return Ok(Renderable::Union(Union::new(name, vec![], variants)?));
-                unimplemented!()
+                let name = uri.to_type_name()?;
+                let variants = uris.iter()
+                    .map(|uri| {
+                        mapget(map, &uri).and_then(|elem| {
+                            let name = uri.to_type_name()?;
+                            typedef_name(uri, elem, true, map).map(|typename| {
+                                Variant::new(name.to_string(), Some(typename))
+                            })
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Renderable::Enum(EnumType::new(name, vec![], variants)?))
             }
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
                 render_all_of(uris, &uri, map)
             }
             Enum(ref variants) => {
-                unimplemented!()
-                // let name = uri.to_type_name(root)?;
-                // Ok(Renderable::Enum(EnumType::new(name, vec![], variants)?))
+                let name = uri.to_type_name()?;
+                Ok(Renderable::Enum(EnumType::new(name, vec![], variants.clone())?))
             }
             Object {
                 ref required,
@@ -572,11 +578,38 @@ fn make_valid_identifier(s: &str) -> Result<String> {
     Ok(out)
 }
 
+#[derive(Clone, PartialEq, Debug)]
+struct Variant {
+    name: Ident,
+    type_: Option<TypeName>,
+}
+
+impl Variant {
+    fn new(name: String, type_: Option<TypeName>) -> Variant {
+        Variant { name: Ident::from(name), type_ }
+    }
+}
+
+impl ToTokens for Variant {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        let name = &self.name;
+        let tok = if let Some(ref type_) = self.type_ {
+            quote! {
+                #name(#type_)
+            }
+        } else {
+            quote! {
+                #name
+            }
+        };
+        tokens.append(tok);
+    }
+}
+
 // TODO could remove this and just use Box<ToTokens>
 #[derive(Clone, PartialEq, Debug)]
 enum Renderable {
     Alias(Alias),
-    Union(Union),
     Struct(Struct),
     Enum(Enum),
 }
@@ -586,14 +619,11 @@ impl ToTokens for Renderable {
         use Renderable::*;
         match *self {
             Alias(ref elem) => elem.to_tokens(tokens),
-            Union(ref elem) => elem.to_tokens(tokens),
             Struct(ref elem) => elem.to_tokens(tokens),
             Enum(ref elem) => elem.to_tokens(tokens),
         }
     }
 }
-
-
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize, new)]
 struct TypeName {
@@ -631,14 +661,20 @@ enum Modifier {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Struct {
-    name: String,
+    name: Ident,
     tags: Vec<Tokens>,
     fields: Vec<Field>,
 }
 
 impl Struct {
-    fn new(name: String, mut tags: Vec<Tokens>, fields: Vec<Field>) -> Struct {
-        let name = name.to_pascal_case();
+    fn new(name: String, tags: Vec<String>, fields: Vec<Field>) -> Struct {
+        let name = Ident::from(name.to_pascal_case());
+        let mut tags = tags.into_iter()
+            .map(|s| {
+                let s = Ident::from(s);
+                quote! {#s}
+            })
+            .collect::<Vec<_>>();
         tags.push(quote! {
             #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
         });
@@ -648,9 +684,9 @@ impl Struct {
 
 impl ToTokens for Struct {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        let name = Ident::new(&*self.name);
+        let name = &self.name;
         let fields = &self.fields;
-        let tags: Vec<_> = self.tags.iter().map(|t| Ident::new(t.as_str())).collect();
+        let tags = &self.tags;
         let tok =
             quote! {
             #(#tags),*
@@ -664,21 +700,27 @@ impl ToTokens for Struct {
 
 #[derive(Clone, PartialEq, Debug)]
 struct Field {
-    name: String,
+    name: Ident,
     typename: TypeName,
     tags: Vec<Tokens>,
 }
 
 impl Field {
-    fn new(name: String, typename: TypeName, mut tags: Vec<Tokens>) -> Result<Field> {
+    fn new(name: String, typename: TypeName, tags: Vec<String>) -> Result<Field> {
+        let mut tags = tags.into_iter()
+            .map(|s| {
+                let s = Ident::from(s);
+                quote! {#s}
+            })
+            .collect::<Vec<_>>();
         let snake = make_valid_identifier(&name.to_snake_case())?;
         if name != snake {
-            tags.push(quote!{
+            tags.push(quote! {
                 #[serde(rename = #name)]
             })
         }
         Ok(Field {
-            name: snake,
+            name: Ident::from(snake),
             typename,
             tags,
         })
@@ -687,8 +729,8 @@ impl Field {
 
 impl ToTokens for Field {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        let name = Ident::new(&*self.name);
-        let tags: Vec<_> = self.tags.iter().map(|t| Ident::new(t.as_str())).collect();
+        let name = &self.name;
+        let tags = &self.tags;
         let typename = &self.typename;
         let tok =
             quote! {
@@ -700,99 +742,21 @@ impl ToTokens for Field {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-struct Union {
-    name: String,
-    tags: Vec<Tokens>,
-    variants: Vec<(Ident, TypeName)>,
-}
-
-impl Union {
-    fn new(name: String, tags: Vec<Tokens>, variants: Vec<TypeName>) -> Result<Union> {
-        let variants = variants
-            .into_iter()
-            .map(|right| {
-                let left = make_valid_identifier(&right.apply_modifiers().to_pascal_case())?;
-                Ok((Ident::from(left), right))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Union {
-            name,
-            tags,
-            variants,
-        })
-    }
-}
-
-impl ToTokens for Union {
-    fn to_tokens(&self, tokens: &mut Tokens) {
-        let name = Ident::new(&*self.name);
-        let tags = &self.tags;
-        let names = self.variants.iter().map(|v| &v.0);
-        let types = self.variants.iter().map(|v| &v.1);
-        let tok =
-            quote! {
-            #(#tags),*
-            pub enum #name {
-                #(#names(#types)),*
-            }
-        };
-        tokens.append(tok);
-    }
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct Alias {
-    name: String,
-    tags: Vec<Tokens>,
-    typename: TypeName,
-}
-
-impl Alias {
-    fn new(name: String, typename: TypeName, tags: Vec<Tokens>) -> Alias {
-        Alias {
-            name,
-            tags,
-            typename,
-        }
-    }
-}
-
-impl ToTokens for Alias {
-    fn to_tokens(&self, tokens: &mut Tokens) {
-        let name = Ident::new(&*self.name);
-        let tags: Vec<_> = self.tags.iter().map(|t| Ident::new(t.as_str())).collect();
-        let typename = &self.typename;
-        let tok =
-            quote! {
-            #(#tags),*
-            type #name = #typename;
-        };
-        tokens.append(tok);
-    }
-}
-
-#[derive(Clone, PartialEq, Debug)]
 struct Enum {
-    name: String,
+    name: Ident,
     tags: Vec<Tokens>,
-    variants: Vec<(Ident, Vec<Tokens>)>,
+    variants: Vec<Variant>,
 }
 
 impl Enum {
-    fn new(name: String, tags: Vec<Tokens>, variants: Vec<String>) -> Result<Enum> {
-        let variants = variants
-            .iter()
-            .map(|variant| {
-                let mut tags = Vec::new();
-                let validname = make_valid_identifier(&variant.to_pascal_case())?;
-                if *variant != validname {
-                    tags.push(quote!{
-                        #[serde(rename = #variant)]
-                    });
-                }
-                Ok((Ident::from(validname), tags))
+    fn new(name: String, tags: Vec<String>, variants: Vec<Variant>) -> Result<Enum> {
+        let name = Ident::from(name);
+        let tags = tags.into_iter()
+            .map(|s| {
+                let s = Ident::from(s);
+                quote! {#s}
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
         Ok(Enum {
             name,
             tags,
@@ -803,29 +767,58 @@ impl Enum {
 
 impl ToTokens for Enum {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        let name = Ident::from(&*self.name);
-        let vars: Vec<_> = self.variants
-            .iter()
-            .map(|v| {
-                let name = &v.0;
-                let tags = &v.1;
-                quote! {
-                #(#tags),*
-                #name
-            }
-            })
-            .collect();
+        let name = &self.name;
+        let tags = &self.tags;
+        let variants = &self.variants;
         let tok =
             quote! {
-            pub enum #name {
-                #(#vars),*
-            }
+                #(#tags),*
+                pub enum #name {
+                    #(#variants),*
+                }
+            };
+        tokens.append(tok);
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Alias {
+    name: Ident,
+    tags: Vec<Tokens>,
+    typename: TypeName,
+}
+
+impl Alias {
+    fn new(name: String, typename: TypeName, tags: Vec<String>) -> Alias {
+        let tags = tags.into_iter()
+            .map(|s| {
+                let s = Ident::from(s);
+                quote! {#s}
+            })
+            .collect();
+        Alias {
+            name: Ident::from(name),
+            tags,
+            typename,
+        }
+    }
+}
+
+impl ToTokens for Alias {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        let name = &self.name;
+        let tags = &self.tags;
+        let typename = &self.typename;
+        let tok =
+            quote! {
+            #(#tags),*
+            type #name = #typename;
         };
         tokens.append(tok);
     }
 }
 
-fn beautify(t: Tokens) -> Result<String> {
+fn rust_format(t: Tokens) -> Result<String> {
     use rustfmt::*;
 
     // FIXME workaround is necessary until rustfmt works programmatically
