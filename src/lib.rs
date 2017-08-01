@@ -90,9 +90,11 @@ impl Uri {
     }
 
     fn identify(&self) -> Identified {
+        // TODO: combine arr search regexs
         let re_def = regex::Regex::new(r"/definitions/([^/]+)$").unwrap();
         let re_prop = regex::Regex::new(r"/properties/([^/]+)$").unwrap();
-        let re_allof = regex::Regex::new(r"/allOf/\d+$").unwrap();
+        let re_allof = regex::Regex::new(r"/allOf$").unwrap();
+        let re_allof_entry = regex::Regex::new(r"/allOf/\d+$").unwrap();
         let re_anyof = regex::Regex::new(r"/anyOf$").unwrap();
         let re_oneof = regex::Regex::new(r"/oneOf$").unwrap();
         if self.deref().find('/').is_none() {
@@ -101,11 +103,13 @@ impl Uri {
             Identified::Definition(c.get(1).unwrap().as_str())
         } else if let Some(c) = re_prop.captures(&*self) {
             return Identified::Property(c.get(1).unwrap().as_str());
+        } else if re_allof.is_match(&*self) {
+            return Identified::AllOf;
         } else if re_anyof.is_match(&*self) {
             return Identified::AnyOf;
         } else if re_oneof.is_match(&*self) {
             return Identified::OneOf;
-        } else if re_allof.is_match(&*self) {
+        } else if re_allof_entry.is_match(&*self) {
             return Identified::AllOfEntry;
         } else {
             Identified::Unknown
@@ -150,7 +154,7 @@ impl Uri {
                 )
             }
             AllOfEntry => "XXX This should never be rendered".into(),
-            AnyOf | OneOf => return self.strip_right().to_type_name(),
+            AllOf | AnyOf | OneOf => return self.strip_right().to_type_name(),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
         };
         make_valid_identifier(&name)
@@ -162,6 +166,7 @@ enum Identified<'a> {
     Definition(&'a str),
     Property(&'a str),
     Root,
+    AllOf,
     AllOfEntry,
     AnyOf,
     OneOf,
@@ -455,9 +460,10 @@ impl MetaSchema {
                 let variants = uris.iter()
                     .map(|uri| {
                         mapget(map, &uri).and_then(|elem| {
-                            let name = uri.to_type_name()?;
-                            typedef_name(uri, elem, true, map).map(|typename| {
-                                Variant::new(name.to_string(), Some(typename))
+                            typedef_name(uri, elem, true, map).and_then(|typename| {
+                                // TODO decide where make_valid_identifier should be called
+                                let name = make_valid_identifier(&typename.apply_modifiers())?;
+                                Ok(Variant::new(name, Some(typename)))
                             })
                         })
                     })
@@ -470,7 +476,9 @@ impl MetaSchema {
             }
             Enum(ref variants) => {
                 let name = uri.to_type_name()?;
-                Ok(Renderable::Enum(EnumType::new(name, vec![], variants.clone())?))
+                Ok(Renderable::Enum(
+                    EnumType::new(name, vec![], variants.clone())?,
+                ))
             }
             Object {
                 ref required,

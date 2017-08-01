@@ -4,8 +4,8 @@ use std::io::prelude::*;
 use quote::{Tokens, ToTokens, Ident};
 use inflector::Inflector;
 
-use ::errors::*;
-use ::make_valid_identifier;
+use errors::*;
+use make_valid_identifier;
 const HEADER: &str = "use ::serde_json::Value as JsonValue;";
 
 #[derive(Clone, PartialEq, Debug)]
@@ -16,7 +16,10 @@ pub(crate) struct Variant {
 
 impl Variant {
     pub(crate) fn new(name: String, type_: Option<TypeName>) -> Variant {
-        Variant { name: Ident::from(name), type_ }
+        Variant {
+            name: Ident::from(name),
+            type_,
+        }
     }
 }
 
@@ -62,7 +65,7 @@ pub(crate) struct TypeName {
 }
 
 impl TypeName {
-    fn apply_modifiers(&self) -> String {
+    pub(crate) fn apply_modifiers(&self) -> String {
         use Modifier::*;
         let mut base = self.base.clone();
         for modifier in &self.modifiers {
