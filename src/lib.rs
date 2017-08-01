@@ -82,7 +82,7 @@ impl Uri {
             Uri(root.to_string())
         } else if path.starts_with("#/") {
             let (_, right) = path.split_at(2);
-            Uri(format!("{}/{}", root, path))
+            Uri(format!("{}/{}", root, right))
         } else {
             Uri(path.into())
         }
@@ -141,9 +141,13 @@ impl Uri {
         let name = match self.identify() {
             Definition(def) => def.to_pascal_case(),
             Root => self.0.to_pascal_case(),
-            Property(prop) => format!("{}{}",
-                                      self.strip_right().strip_right().to_type_name()?,
-                                      prop.to_pascal_case()),
+            Property(prop) => {
+                format!(
+                    "{}{}",
+                    self.strip_right().strip_right().to_type_name()?,
+                    prop.to_pascal_case()
+                )
+            }
             AllOfEntry => "XXX This should never be rendered".into(),
             AnyOf | OneOf => return self.strip_right().to_type_name(),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
@@ -165,9 +169,12 @@ enum Identified<'a> {
 
 impl Schema {
     fn identify_and_gather(&self, uri: Uri, root: &str, map: &mut SchemaMap) -> Result<()> {
+        if let Some(defns) = self.definitions.as_ref() {
+            gather_definitions_map(&defns, &uri.join("definitions"), root, map)?;
+        }
         use MetaSchema::*;
         let meta = if let Some(ref_) = self.ref_.as_ref() {
-           Reference(Uri::new(root, ref_))
+            Reference(Uri::new(root, ref_))
         } else if let Some(ref enums) = self.enum_ {
             unimplemented!()
         } else if let Some(ref schemas) = self.any_of {
@@ -179,10 +186,17 @@ impl Schema {
         } else if let Some(ref schemas) = self.all_of {
             let uris = gather_definitions_vec(schemas, &uri.join("allOf"), root, map)?;
             AllOf(uris)
-        } else if let Some(ref st) = self.type_ {
-            let st = st.unwrap_or_bail().chain_err(|| format!("Failed to get schema type for {:?}", st))?;
+        } else {
             use SimpleType as ST;
             use Primitive as PrimEnum;
+            let st = self.type_
+                .as_ref()
+                .map(|st| {
+                    st.unwrap_or_bail().chain_err(|| {
+                        format!("Failed to get schema type for {:?}", st)
+                    })
+                })
+                .unwrap_or(Ok(ST::Object))?;
             match st {
                 ST::Boolean => Primitive(PrimEnum::Boolean),
                 ST::Integer => Primitive(PrimEnum::Integer),
@@ -190,24 +204,37 @@ impl Schema {
                 ST::Number => Primitive(PrimEnum::Number),
                 ST::String => Primitive(PrimEnum::String),
                 ST::Array => {
-                    let uri = unimplemented!();
+                    let uri = self.items
+                        .as_ref()
+                        .map(|items| match *items {
+                            SchemaItems::Schema(ref schema) => {
+                                let uri = uri.join("items");
+                                schema.identify_and_gather(uri.clone(), root, map)?;
+                                Ok(Some(uri))
+                            }
+                            SchemaItems::Schemas(_) => Err(ErrorKind::from(
+                                "Multiple array items not supported",
+                            )),
+                        })
+                        .unwrap_or(Ok(None))?;
                     Array(uri)
                 }
                 ST::Object => {
-                    unimplemented!()
+                    if let Some(ref props) = self.properties {
+                        let required: HashSet<String> = self.required
+                            .as_ref()
+                            .map(|v| v.iter().map(|s| s.clone()).collect())
+                            .unwrap_or(HashSet::new());
+                        let fields =
+                            gather_definitions_map(&props, &uri.join("properties"), root, map)?;
+                        Object { required, fields }
+                    } else {
+                        Untyped // Default
+                    }
                 }
             }
-        } else if let Some(ref props)= self.properties {
-            let required: HashSet<String> = self
-                .required
-                .as_ref()
-                .map(|v| v.iter().map(|s| s.clone()).collect())
-                .unwrap_or(HashSet::new());
-            let fields = gather_definitions_map(&props, &uri.join("properties"), root, map)?;
-            Object{required, fields}
-        } else {
-            Untyped // Default assume object
         };
+        println!("URI: {}", uri);
         if map.insert(uri.clone(), meta).is_some() {
             bail!("Uri {} already present in schema map", uri)
         }
@@ -215,7 +242,7 @@ impl Schema {
     }
 }
 
-fn render_all_of(uris: &[Uri] , uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
+fn render_all_of(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
     let mut fields = Vec::new();
     uris.iter()
         .map(|uri| {
@@ -253,11 +280,14 @@ fn gather_definitions_map(
     root: &str,
     map: &mut SchemaMap,
 ) -> Result<Map<Uri>> {
-    schema_map.iter().map(|(name, schema)| {
-        let uri = uri.join(name);
-        schema.identify_and_gather(uri.clone(), root, map)?;
-        Ok((name.clone(), uri))
-    }).collect::<Result<BTreeMap<String, Uri>>>()
+    schema_map
+        .iter()
+        .map(|(name, schema)| {
+            let uri = uri.join(name);
+            schema.identify_and_gather(uri.clone(), root, map)?;
+            Ok((name.clone(), uri))
+        })
+        .collect::<Result<BTreeMap<String, Uri>>>()
 }
 
 fn gather_definitions_vec(
@@ -266,34 +296,40 @@ fn gather_definitions_vec(
     root: &str,
     map: &mut SchemaMap,
 ) -> Result<Vec<Uri>> {
-    schemas.iter().enumerate().map(|(ix, schema)| {
-        let uri = uri.join(ix + 1);
-        schema.identify_and_gather(uri.clone(), root, map)?;
-        Ok(uri)
-    }).collect::<Result<Vec<_>>>()
+    schemas
+        .iter()
+        .enumerate()
+        .map(|(ix, schema)| {
+            let uri = uri.join(ix + 1);
+            schema.identify_and_gather(uri.clone(), root, map)?;
+            Ok(uri)
+        })
+        .collect::<Result<Vec<_>>>()
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
 pub struct RootSchema {
     name: String,
-    schema: Schema
+    schema: Schema,
 }
 
 impl RootSchema {
-    pub fn from_reader_yaml<R: Read>(reader: R) -> Result<RootSchema> {
-        Ok(serde_yaml::from_reader(reader)?)
+    pub fn from_reader_yaml<R: Read>(name: String, reader: R) -> Result<RootSchema> {
+        let schema: Schema = serde_yaml::from_reader(reader)?;
+        Ok(RootSchema { name, schema })
     }
 
-    pub fn from_file_yaml<P: AsRef<Path>>(path: P) -> Result<RootSchema> {
-        RootSchema::from_reader_yaml(File::open(path)?)
+    pub fn from_file_yaml<P: AsRef<Path>>(name: String, path: P) -> Result<RootSchema> {
+        Ok(RootSchema::from_reader_yaml(name, File::open(path)?)?)
     }
 
-    pub fn from_reader_json<R: Read>(reader: R) -> Result<RootSchema> {
-        Ok(serde_json::from_reader(reader)?)
+    pub fn from_reader_json<R: Read>(name: String, reader: R) -> Result<RootSchema> {
+        let schema = serde_json::from_reader(reader)?;
+        Ok(RootSchema { name, schema })
     }
 
-    pub fn from_file_json<P: AsRef<Path>>(path: P) -> Result<RootSchema> {
-        RootSchema::from_reader_json(File::open(path)?)
+    pub fn from_file_json<P: AsRef<Path>>(name: String, path: P) -> Result<RootSchema> {
+        Ok(RootSchema::from_reader_json(name, File::open(path)?)?)
     }
 
     fn gather_definitions(&self) -> Result<SchemaMap> {
@@ -303,7 +339,7 @@ impl RootSchema {
         Ok(map)
     }
 
-    fn renderables(&self, root: &str) -> Result<Vec<Renderable>> {
+    fn make_renderables(&self) -> Result<Vec<Renderable>> {
         let map = self.gather_definitions()?;
         let defns = collect_renderable_definitions(&map);
         defns
@@ -312,8 +348,8 @@ impl RootSchema {
             .collect()
     }
 
-    pub fn generate(&self, root: &str) -> Result<String> {
-        let renderables = self.renderables(root)?;
+    pub fn generate(&self) -> Result<String> {
+        let renderables = self.make_renderables()?;
         let tokens = render_all(&renderables);
         beautify(tokens)
     }
@@ -337,11 +373,11 @@ fn collect_renderable_definitions(map: &SchemaMap) -> Vec<(&Uri, &MetaSchema)> {
             if uri.is_definition() {
                 true // always create regardless of content
             } else if uri.is_all_of_entry() {
-                false  // 'partial' schema
+                false // 'partial' schema
             } else {
                 match *metaschema {
                     Reference(_) | Primitive(_) | Array(_) | Untyped => false,
-                    Enum(_) | AnyOf(_) | AllOf(_) | OneOf(_) | Object{..} => true,
+                    Enum(_) | AnyOf(_) | AllOf(_) | OneOf(_) | Object { .. } => true,
                 }
             }
         })
@@ -354,7 +390,7 @@ enum Primitive {
     Boolean,
     Integer,
     Number,
-    String
+    String,
 }
 
 impl Primitive {
@@ -365,7 +401,7 @@ impl Primitive {
             Boolean => "bool",
             Integer => "i64",
             Number => "f64",
-            String => "String"
+            String => "String",
         }
     }
 }
@@ -374,19 +410,22 @@ impl Primitive {
 enum MetaSchema {
     Reference(Uri),
     Primitive(Primitive),
-    Array(Uri),
+    Array(Option<Uri>),
     Enum(Vec<Variant>),
     AllOf(Vec<Uri>),
     AnyOf(Vec<Uri>),
     OneOf(Vec<Uri>),
-    Object{required: HashSet<String>, fields: Map<Uri>},
+    Object {
+        required: HashSet<String>,
+        fields: Map<Uri>,
+    },
     Untyped,
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 struct Variant {
     name: String,
-    type_: Option<Uri>
+    type_: Option<Uri>,
 }
 
 impl MetaSchema {
@@ -426,14 +465,22 @@ impl MetaSchema {
                 // let name = uri.to_type_name(root)?;
                 // Ok(Renderable::Enum(EnumType::new(name, vec![], variants)?))
             }
-            Object{ref required, ref fields} => renderable_object(uri, required, fields, map),
+            Object {
+                ref required,
+                ref fields,
+            } => renderable_object(uri, required, fields, map),
         }
     }
-
 }
 
-fn renderable_object(uri: &Uri, required_keys: &HashSet<String>, field_map: &Map<Uri>, map: &SchemaMap) -> Result<Renderable> {
-    let fields = field_map.iter()
+fn renderable_object(
+    uri: &Uri,
+    required_keys: &HashSet<String>,
+    field_map: &Map<Uri>,
+    map: &SchemaMap,
+) -> Result<Renderable> {
+    let fields = field_map
+        .iter()
         .map(|(field_name, uri)| {
             let metaschema = mapget(map, &uri)?;
             let is_required = required_keys.contains(field_name);
@@ -468,26 +515,27 @@ fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -
             mapget(map, uri).and_then(|deref| typedef_name(uri, deref, required, map))
         }
         Primitive(prim) => Ok(TypeName::new(prim.native().into(), mods)),
-        Array(ref items_uri) => {
+        Array(Some(ref items_uri)) => {
             mods.insert(0, Modifier::Vec);
-            mapget(map, items_uri)
-                .map(|metaschema| {
-                    typedef_name(items_uri, metaschema, true, map).map(|mut typename| {
-                        typename.modifiers.extend(&mods);
-                        typename
-                    })
-                })
-                .unwrap_or(Ok(TypeName::new(GENERIC_TYPE.into(), mods)))
+            let meta = mapget(map, items_uri)?;
+            typedef_name(items_uri, meta, true, map).map(|mut typename| {
+                typename.modifiers.extend(&mods);
+                typename
+            })
+        }
+        Array(None) => {
+            mods.insert(0, Modifier::Vec);
+            Ok(TypeName::new(GENERIC_TYPE.into(), mods))
         }
         Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
-        Object{..} | _ => Ok(TypeName::new(uri.to_type_name()?, mods)),
+        Object { .. } | _ => Ok(TypeName::new(uri.to_type_name()?, mods)),
     }
 }
 
-impl SimpleTypeOrSimpleTypes {
+impl SchemaType {
     fn unwrap_or_bail(&self) -> Result<SimpleType> {
         match *self {
-            SimpleTypeOrSimpleTypes::SimpleType(st) => Ok(st),
+            SchemaType::SimpleType(st) => Ok(st),
             _ => bail!("Multiple types not supported"),
         }
     }
@@ -842,19 +890,24 @@ mod tests {
 
     #[test]
     fn test_simple_schema() {
-        let root = RootSchema::from_file_yaml("test_schemas/simple.yaml").unwrap();
-        root.generate("TestSimple").unwrap();
+        let root = RootSchema::from_file_yaml("test simple".into(), "test_schemas/simple.yaml")
+            .unwrap();
+        root.generate().unwrap();
     }
 
     #[test]
     fn test_meta_schema() {
-        let root = RootSchema::from_file_yaml("test_schemas/metaschema.json").unwrap();
-        root.generate("Schema").unwrap();
+        let root = RootSchema::from_file_yaml("schema".into(), "test_schemas/metaschema.json")
+            .unwrap();
+        root.generate().unwrap();
     }
 
     #[test]
     fn test_debug_server_schema() {
-        let root = RootSchema::from_file_yaml("test_schemas/debugserver-schema.json").unwrap();
-        root.generate("Debug").unwrap();
+        let root = RootSchema::from_file_yaml(
+            "debug server".into(),
+            "test_schemas/debugserver-schema.json",
+        ).unwrap();
+        root.generate().unwrap();
     }
 }

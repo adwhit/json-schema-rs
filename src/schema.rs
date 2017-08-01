@@ -47,7 +47,7 @@ pub struct Schema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<SchemaOrSchemas>,
+    pub items: Option<SchemaItems>,
     #[serde(rename = "maxItems")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_items: Option<PositiveInteger>,
@@ -91,7 +91,7 @@ pub struct Schema {
     pub title: Option<String>,
     #[serde(rename = "type")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub type_: Option<SimpleTypeOrSimpleTypes>,
+    pub type_: Option<SchemaType>,
     #[serde(rename = "uniqueItems")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique_items: Option<bool>,
@@ -125,14 +125,14 @@ pub enum BoolOrSchema {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum SimpleTypeOrSimpleTypes {
+pub enum SchemaType {
     SimpleType(SimpleType),
     SimpleTypes(Vec<SimpleType>),
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum SchemaOrSchemas {
+pub enum SchemaItems {
     Schema(Box<Schema>),
     Schemas(Schemas),
 }
