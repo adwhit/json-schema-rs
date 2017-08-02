@@ -77,3 +77,9 @@ definitions:
       - properties:
           height:
             type: number
+
+  some enum:
+    enum:
+      - this little piggy
+      - that
+      - other

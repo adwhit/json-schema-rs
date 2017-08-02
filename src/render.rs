@@ -11,27 +11,45 @@ const HEADER: &str = "use ::serde_json::Value as JsonValue;";
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Variant {
     name: Ident,
+    tags: Vec<Tokens>,
     type_: Option<TypeName>,
 }
 
 impl Variant {
-    pub(crate) fn new(name: String, type_: Option<TypeName>) -> Variant {
-        Variant {
-            name: Ident::from(name),
-            type_,
+    pub(crate) fn new(name: String, tags: Vec<String>, type_: Option<TypeName>) -> Result<Variant> {
+        let mut tags = tags.into_iter()
+            .map(|s| {
+                let s = Ident::from(s);
+                quote! {#s}
+            })
+            .collect::<Vec<_>>();
+
+        let pascal = make_valid_identifier(&name.to_pascal_case())?;
+        if type_.is_none() && name != pascal {
+            tags.push(quote! {
+                #[serde(rename = #name)]
+            })
         }
+        Ok(Variant {
+            name: Ident::from(pascal),
+            tags,
+            type_,
+        })
     }
 }
 
 impl ToTokens for Variant {
     fn to_tokens(&self, tokens: &mut Tokens) {
         let name = &self.name;
+        let tags = &self.tags;
         let tok = if let Some(ref type_) = self.type_ {
             quote! {
+                #(#tags),*
                 #name(#type_)
             }
         } else {
             quote! {
+                #(#tags),*
                 #name
             }
         };
@@ -202,15 +220,17 @@ pub(crate) struct Enum {
 
 impl Enum {
     pub(crate) fn new(name: String, tags: Vec<String>, variants: Vec<Variant>) -> Result<Enum> {
-        let name = Ident::from(name);
-        let tags = tags.into_iter()
+        let mut tags = tags.into_iter()
             .map(|s| {
                 let s = Ident::from(s);
                 quote! {#s}
             })
-            .collect();
+            .collect::<Vec<_>>();
+        tags.push(quote! {
+            #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        });
         Ok(Enum {
-            name,
+            name: Ident::from(name),
             tags,
             variants,
         })

@@ -185,7 +185,7 @@ impl Schema {
                 .map(|enm| {
                     enm.as_str()
                         .ok_or(ErrorKind::from("enum items must be strings").into())
-                        .map(|name| Variant::new(name.to_string(), None))
+                        .and_then(|name| Variant::new(name.to_string(), vec![], None))
                 })
                 .collect::<Result<Vec<Variant>>>()?;
             Enum(variants)
@@ -461,7 +461,7 @@ impl MetaSchema {
                             typedef_name(uri, elem, true, map).and_then(|typename| {
                                 // TODO decide where make_valid_identifier should be called
                                 let name = make_valid_identifier(&typename.apply_modifiers())?;
-                                Ok(Variant::new(name, Some(typename)))
+                                Ok(Variant::new(name, vec![], Some(typename))?)
                             })
                         })
                     })
