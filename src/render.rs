@@ -15,15 +15,19 @@ pub(crate) struct Variant {
     type_: Option<TypeName>,
 }
 
+fn strings_to_tokens(strings: Vec<String>) -> Vec<Tokens> {
+    strings
+        .into_iter()
+        .map(|s| {
+            let s = Ident::from(s);
+            quote! {#s}
+        })
+        .collect::<Vec<_>>()
+}
+
 impl Variant {
     pub(crate) fn new(name: String, tags: Vec<String>, type_: Option<TypeName>) -> Result<Variant> {
-        let mut tags = tags.into_iter()
-            .map(|s| {
-                let s = Ident::from(s);
-                quote! {#s}
-            })
-            .collect::<Vec<_>>();
-
+        let mut tags = strings_to_tokens(tags);
         let pascal = make_valid_identifier(&name.to_pascal_case())?;
         if type_.is_none() && name != pascal {
             tags.push(quote! {
@@ -81,12 +85,17 @@ pub(crate) struct TypeName {
     base: String,
     boxed: bool,
     vec: bool,
-    option: bool
+    option: bool,
 }
 
 impl TypeName {
     pub fn new(base: String, required: bool) -> TypeName {
-        TypeName {base, boxed: false, vec:false, option: !required}
+        TypeName {
+            base,
+            boxed: false,
+            vec: false,
+            option: !required,
+        }
     }
 
     pub fn array(mut self, arr: bool) -> TypeName {
@@ -121,13 +130,6 @@ impl ToTokens for TypeName {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Deserialize, Serialize)]
-pub(crate) enum Modifier {
-    Option,
-    Box,
-    Vec,
-}
-
 #[derive(Clone, PartialEq, Debug)]
 pub struct Struct {
     name: Ident,
@@ -138,12 +140,7 @@ pub struct Struct {
 impl Struct {
     pub(crate) fn new(name: String, tags: Vec<String>, fields: Vec<Field>) -> Struct {
         let name = Ident::from(name.to_pascal_case());
-        let mut tags = tags.into_iter()
-            .map(|s| {
-                let s = Ident::from(s);
-                quote! {#s}
-            })
-            .collect::<Vec<_>>();
+        let mut tags = strings_to_tokens(tags);
         tags.push(quote! {
             #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
         });
@@ -177,12 +174,7 @@ pub(crate) struct Field {
 
 impl Field {
     pub(crate) fn new(name: String, typename: TypeName, tags: Vec<String>) -> Result<Field> {
-        let mut tags = tags.into_iter()
-            .map(|s| {
-                let s = Ident::from(s);
-                quote! {#s}
-            })
-            .collect::<Vec<_>>();
+        let mut tags = strings_to_tokens(tags);
         let snake = make_valid_identifier(&name.to_snake_case())?;
         if name != snake {
             tags.push(quote! {
@@ -220,12 +212,7 @@ pub(crate) struct Enum {
 
 impl Enum {
     pub(crate) fn new(name: String, tags: Vec<String>, variants: Vec<Variant>) -> Result<Enum> {
-        let mut tags = tags.into_iter()
-            .map(|s| {
-                let s = Ident::from(s);
-                quote! {#s}
-            })
-            .collect::<Vec<_>>();
+        let mut tags = strings_to_tokens(tags);
         tags.push(quote! {
             #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
         });
@@ -262,12 +249,7 @@ pub struct Alias {
 
 impl Alias {
     pub(crate) fn new(name: String, typename: TypeName, tags: Vec<String>) -> Alias {
-        let tags = tags.into_iter()
-            .map(|s| {
-                let s = Ident::from(s);
-                quote! {#s}
-            })
-            .collect();
+        let tags = strings_to_tokens(tags);
         Alias {
             name: Ident::from(name),
             tags,
@@ -284,7 +266,7 @@ impl ToTokens for Alias {
         let tok =
             quote! {
             #(#tags),*
-            type #name = #typename;
+            pub type #name = #typename;
         };
         tokens.append(tok);
     }

@@ -499,8 +499,9 @@ fn renderable_object(
             let metaschema = mapget(map, &uri)?;
             let is_required = required_keys.contains(field_name);
             let tags = vec![];
-            let typename = typedef_name(uri, metaschema, is_required, map)?
-            .boxed(&name);
+            let typename = typedef_name(uri, metaschema, is_required, map)?.boxed(
+                &name,
+            );
             Ok(Field::new(field_name.clone(), typename, tags).chain_err(
                 || {
                     format!("Failed to create field {} at uri {}", field_name, uri)
@@ -529,9 +530,7 @@ fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -
             let meta = mapget(map, items_uri)?;
             Ok(typedef_name(items_uri, meta, required, map)?.array(true))
         }
-        Array(None) => {
-            Ok(TypeName::new(GENERIC_TYPE.into(), required).array(true))
-        }
+        Array(None) => Ok(TypeName::new(GENERIC_TYPE.into(), required).array(true)),
         Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), required)),
         Object { .. } | _ => Ok(TypeName::new(uri.to_type_name()?, required)),
     }
