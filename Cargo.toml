@@ -4,7 +4,6 @@ name = "openapi3-bootstrap"
 version = "0.1.0"
 [dependencies]
 Inflector = "0.10"
-derive-new = "0.5"
 error-chain = "0.10"
 lazy_static = "0.2"
 quote = "0.3"

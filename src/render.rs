@@ -58,22 +58,40 @@ impl ToTokens for Renderable {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize, new)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub(crate) struct TypeName {
     base: String,
-    pub(crate) modifiers: Vec<Modifier>,
+    boxed: bool,
+    vec: bool,
+    option: bool
+}
+
+impl TypeName {
+    pub fn new(base: String, required: bool) -> TypeName {
+        TypeName {base, boxed: false, vec:false, option: !required}
+    }
+
+    pub fn array(mut self, arr: bool) -> TypeName {
+        self.vec = arr;
+        self
+    }
+
+    pub fn boxed(mut self, base: &str) -> TypeName {
+        self.boxed = self.base == base;
+        self
+    }
 }
 
 impl TypeName {
     pub(crate) fn apply_modifiers(&self) -> String {
-        use Modifier::*;
         let mut base = self.base.clone();
-        for modifier in &self.modifiers {
-            base = match *modifier {
-                Option => format!("Option<{}>", base),
-                Box => format!("Box<{}>", base),
-                Vec => format!("Vec<{}>", base),
-            };
+        if self.vec {
+            base = format!("Vec<{}>", base);
+        } else if self.boxed {
+            base = format!("Box<{}>", base);
+        }
+        if self.option {
+            base = format!("Option<{}>", base);
         }
         base
     }

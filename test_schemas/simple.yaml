@@ -5,6 +5,14 @@ properties:
     type: integer
   prop2:
     $ref: "#/definitions/intWrapper"
+  self-ref:
+    $ref: "#"
+  self-ref-array:
+    type: array
+    items:
+      $ref: "#"
+  unnamed-array:
+    type: array
   mod:
     required:
       - name
@@ -14,7 +22,7 @@ properties:
       Weight of me:
         $ref: "#/definitions/AGE"
       Fear of me:
-        $ref: "#/definitions/badly named array"
+        $ref: "#/definitions/badly named.[]*&( thing"
 
 definitions:
   intWrapper:
@@ -23,7 +31,7 @@ definitions:
       none:
         conforming: nonsense
 
-  badly named array:
+  badly named.[]*&( thing:
     type: object
     properties:
       this:

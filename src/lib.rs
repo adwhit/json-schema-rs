@@ -12,8 +12,6 @@ extern crate quote;
 extern crate rustfmt;
 #[macro_use]
 extern crate lazy_static;
-#[macro_use]
-extern crate derive_new;
 
 use std::fs::File;
 use std::path::Path;
@@ -494,13 +492,15 @@ fn renderable_object(
     field_map: &Map<Uri>,
     map: &SchemaMap,
 ) -> Result<Renderable> {
+    let name = uri.to_type_name()?;
     let fields = field_map
         .iter()
         .map(|(field_name, uri)| {
             let metaschema = mapget(map, &uri)?;
             let is_required = required_keys.contains(field_name);
             let tags = vec![];
-            let typename = typedef_name(uri, metaschema, is_required, map)?;
+            let typename = typedef_name(uri, metaschema, is_required, map)?
+            .boxed(&name);
             Ok(Field::new(field_name.clone(), typename, tags).chain_err(
                 || {
                     format!("Failed to create field {} at uri {}", field_name, uri)
@@ -508,7 +508,6 @@ fn renderable_object(
             )?)
         })
         .collect::<Result<Vec<Field>>>()?;
-    let name = uri.to_type_name()?;
     let tags = vec![];
     Ok(Renderable::Struct(Struct::new(name, tags, fields)))
 }
@@ -520,30 +519,21 @@ fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
 }
 
 fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<TypeName> {
-    let mut mods = Vec::new();
-    if !required {
-        mods.push(Modifier::Option)
-    };
     use MetaSchema::*;
     match *meta {
         Reference(ref uri) => {
             mapget(map, uri).and_then(|deref| typedef_name(uri, deref, required, map))
         }
-        Primitive(prim) => Ok(TypeName::new(prim.native().into(), mods)),
+        Primitive(prim) => Ok(TypeName::new(prim.native().into(), required)),
         Array(Some(ref items_uri)) => {
-            mods.insert(0, Modifier::Vec);
             let meta = mapget(map, items_uri)?;
-            typedef_name(items_uri, meta, true, map).map(|mut typename| {
-                typename.modifiers.extend(&mods);
-                typename
-            })
+            Ok(typedef_name(items_uri, meta, required, map)?.array(true))
         }
         Array(None) => {
-            mods.insert(0, Modifier::Vec);
-            Ok(TypeName::new(GENERIC_TYPE.into(), mods))
+            Ok(TypeName::new(GENERIC_TYPE.into(), required).array(true))
         }
-        Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), mods)),
-        Object { .. } | _ => Ok(TypeName::new(uri.to_type_name()?, mods)),
+        Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), required)),
+        Object { .. } | _ => Ok(TypeName::new(uri.to_type_name()?, required)),
     }
 }
 
