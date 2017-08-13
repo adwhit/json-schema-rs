@@ -1,6 +1,3 @@
-use std::fs::File;
-use std::io::prelude::*;
-
 use quote::{Tokens, ToTokens, Ident};
 use inflector::Inflector;
 
@@ -28,7 +25,7 @@ fn strings_to_tokens(strings: Vec<String>) -> Vec<Tokens> {
 impl Variant {
     pub(crate) fn new(name: String, tags: Vec<String>, type_: Option<TypeName>) -> Result<Variant> {
         let mut tags = strings_to_tokens(tags);
-        let pascal = make_valid_identifier(&name.to_pascal_case())?;
+        let pascal = make_valid_identifier(&name.to_pascal_case())?.into_owned();
         if type_.is_none() && name != pascal {
             tags.push(quote! {
                 #[serde(rename = #name)]
@@ -175,7 +172,7 @@ pub(crate) struct Field {
 impl Field {
     pub(crate) fn new(name: String, typename: TypeName, tags: Vec<String>) -> Result<Field> {
         let mut tags = strings_to_tokens(tags);
-        let snake = make_valid_identifier(&name.to_snake_case())?;
+        let snake = make_valid_identifier(&name.to_snake_case())?.into_owned();
         if name != snake {
             tags.push(quote! {
                 #[serde(rename = #name)]
@@ -270,30 +267,4 @@ impl ToTokens for Alias {
         };
         tokens.append(tok);
     }
-}
-
-pub(crate) fn rust_format(t: Tokens) -> Result<String> {
-    use rustfmt::*;
-
-    // FIXME workaround is necessary until rustfmt works programmatically
-    //let tmppath = "/tmp/rustfmt.rs"; // TODO use tempdir
-    let tmppath = "/home/alex/scratch/stubgen/src/gen.rs"; // TODO use tempdir
-    {
-        let mut tmp = File::create(tmppath)?;
-        writeln!(tmp, "{}", HEADER)?;
-        tmp.write_all(t.as_str().as_bytes())?;
-    }
-
-    let input = Input::File(tmppath.into());
-    let mut fakebuf = Vec::new(); // pretty weird that this is necessary.. but it is
-
-    match format_input(input, &Default::default(), Some(&mut fakebuf)) {
-        Ok((_summmary, _filemap, _report)) => {}
-        Err((e, _summary)) => Err(e)?,
-    }
-
-    let mut tmp = File::open(tmppath)?;
-    let mut buf = String::new();
-    tmp.read_to_string(&mut buf)?;
-    Ok(buf)
 }

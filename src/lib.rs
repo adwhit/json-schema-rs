@@ -9,9 +9,9 @@ extern crate inflector;
 extern crate regex;
 #[macro_use]
 extern crate quote;
-extern crate rustfmt;
-#[macro_use]
-extern crate lazy_static;
+extern crate simple_codegen;
+
+use simple_codegen::utils::{rust_format, make_valid_identifier};
 
 use std::fs::File;
 use std::path::Path;
@@ -27,8 +27,13 @@ use errors::*;
 use schema::*;
 use render::*;
 
+#[allow(unused_doc_comment)]
 mod errors {
+    use ::simple_codegen::errors as codegen;
     error_chain!{
+        links {
+            Codegen(codegen::Error, codegen::ErrorKind);
+        }
         foreign_links {
             Io(::std::io::Error);
             Json(::serde_json::Error);
@@ -38,15 +43,8 @@ mod errors {
     }
 }
 
-mod keywords;
 mod schema;
 mod render;
-
-lazy_static! {
-    static ref RUST_KEYWORDS: HashSet<&'static str> = {
-        keywords::RUST_KEYWORDS.iter().map(|v| *v).collect()
-    };
-}
 
 const GENERIC_TYPE: &str = "JsonValue";
 
@@ -155,7 +153,7 @@ impl Uri {
             AllOf | AnyOf | OneOf => return self.strip_right().to_type_name(),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
         };
-        make_valid_identifier(&name)
+        Ok(make_valid_identifier(&name)?.into_owned())
     }
 }
 
@@ -363,7 +361,7 @@ impl RootSchema {
     pub fn generate(&self) -> Result<String> {
         let renderables = self.make_renderables()?;
         let tokens = render_all(&renderables);
-        rust_format(tokens)
+        Ok(rust_format(tokens.as_str())?)
     }
 }
 
@@ -460,7 +458,7 @@ impl MetaSchema {
                         mapget(map, &uri).and_then(|elem| {
                             typedef_name(uri, elem, true, map).and_then(|typename| {
                                 // TODO decide where make_valid_identifier should be called
-                                let name = make_valid_identifier(&typename.apply_modifiers())?;
+                                let name = make_valid_identifier(&typename.apply_modifiers())?.into_owned();
                                 Ok(Variant::new(name, vec![], Some(typename))?)
                             })
                         })
@@ -545,60 +543,9 @@ impl SchemaType {
     }
 }
 
-fn make_valid_identifier(s: &str) -> Result<String> {
-    // strip out invalid characters and ensure result is valid
-    // bit ugly to reallocate but at least it is simple
-    // TODO use unicode XID_start/XID_continue
-    let mut out = String::new();
-    let mut is_leading_char = true;
-    for c in s.chars() {
-        if is_leading_char {
-            match c {
-                'A'...'Z' | 'a'...'z' | '_' => {
-                    is_leading_char = false;
-                    out.push(c);
-                }
-                _ => (),
-            }
-        } else {
-            match c {
-                'A'...'Z' | 'a'...'z' | '_' | '0'...'9' => out.push(c),
-                _ => (),
-            }
-        }
-    }
-    if RUST_KEYWORDS.contains(&*out) {
-        out.push('_')
-    };
-    if out.len() == 0 || out == "_" {
-        bail!("could not generate valid identifier from {}", s)
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_make_valid_identifier() {
-        let id1 = "1234_abcd".into();
-        assert_eq!(make_valid_identifier(id1).unwrap(), "_abcd");
-        let id2 = "$1234Abcd".into();
-        assert_eq!(make_valid_identifier(id2).unwrap(), "Abcd");
-        let id3 = "$@1234\\|./".into();
-        assert!(make_valid_identifier(id3).is_err());
-        let id4 = "1234_".into();
-        assert!(make_valid_identifier(id4).is_err());
-        let id5 = "".into();
-        assert!(make_valid_identifier(id5).is_err());
-        let id6 = "_".into();
-        assert!(make_valid_identifier(id6).is_err());
-        let id7 = "type".into();
-        assert_eq!(make_valid_identifier(id7).unwrap(), "type_");
-        let id8 = "this 123".into();
-        assert_eq!(make_valid_identifier(id8).unwrap(), "this123");
-    }
 
     #[test]
     fn test_uri_to_type_name() {
