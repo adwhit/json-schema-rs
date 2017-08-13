@@ -1,6 +1,6 @@
 [package]
 authors = ["Alex Whitney <adwhit@fastmail.com>"]
-name = "openapi3-bootstrap"
+name = "json-schema-rs"
 version = "0.1.0"
 [dependencies]
 Inflector = "0.10"
