@@ -187,6 +187,10 @@ impl Schema {
                 })
                 .collect::<Result<Vec<Variant>>>()?;
             Enum(variants)
+        } else if let Some(BoolOrSchema::Schema(ref schema)) = self.additional_properties {
+            let ap_uri = uri.join("additionalProperties");
+            schema.identify_and_gather(ap_uri.clone(), root, map)?;
+            Map(ap_uri)
         } else if let Some(ref schemas) = self.any_of {
             let uris = gather_definitions_vec(schemas, &uri.join("anyOf"), root, map)?;
             AnyOf(uris)
@@ -387,7 +391,7 @@ fn collect_renderable_definitions(map: &SchemaMap) -> Vec<(&Uri, &MetaSchema)> {
             } else {
                 match *metaschema {
                     Reference(_) | Primitive(_) | Array(_) | Untyped => false,
-                    Enum(_) | AnyOf(_) | AllOf(_) | OneOf(_) | Object { .. } => true,
+                    Map(_) | Enum(_) | AnyOf(_) | AllOf(_) | OneOf(_) | Object { .. } => true,
                 }
             }
         })
@@ -422,6 +426,7 @@ enum MetaSchema {
     Primitive(Primitive),
     Array(Option<Uri>),
     Enum(Vec<Variant>),
+    Map(Uri),
     AllOf(Vec<Uri>),
     AnyOf(Vec<Uri>),
     OneOf(Vec<Uri>),
@@ -445,7 +450,7 @@ impl MetaSchema {
         use Enum as EnumType;
         use MetaSchema::*;
         match *self {
-            Primitive(_) | Reference(_) | Array(_) | Untyped => {
+            Map(_) | Primitive(_) | Reference(_) | Array(_) | Untyped => {
                 let name = uri.to_type_name()?;
                 let inner = typedef_name(uri, self, true, map)?;
                 let tags = vec![];
@@ -517,6 +522,9 @@ fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
     })
 }
 
+/// Fetch the name of the type referred to by the metaschema
+/// e.g. for "type MyVec = Vec<Data>", 'Vec<Data>' is the typedef name.
+/// The name will be inferred from the uri if necessary
 fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<TypeName> {
     use MetaSchema::*;
     match *meta {
@@ -527,6 +535,10 @@ fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -
         Array(Some(ref items_uri)) => {
             let meta = mapget(map, items_uri)?;
             Ok(typedef_name(items_uri, meta, required, map)?.array(true))
+        }
+        Map(ref items_uri) => {
+            let meta = mapget(map, items_uri)?;
+            Ok(typedef_name(items_uri, meta, required, map)?.map(true))
         }
         Array(None) => Ok(TypeName::new(GENERIC_TYPE.into(), required).array(true)),
         Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), required)),
@@ -571,7 +583,8 @@ mod tests {
     fn test_meta_schema() {
         let root = RootSchema::from_file_yaml("schema".into(), "test_schemas/metaschema.json")
             .unwrap();
-        root.generate().unwrap();
+        let out = root.generate().unwrap();
+        println!("{}", out);
     }
 
     #[test]

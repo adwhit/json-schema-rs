@@ -81,6 +81,7 @@ impl ToTokens for Renderable {
 pub(crate) struct TypeName {
     base: String,
     boxed: bool,
+    map: bool,
     vec: bool,
     option: bool,
 }
@@ -90,9 +91,15 @@ impl TypeName {
         TypeName {
             base,
             boxed: false,
+            map: false,
             vec: false,
             option: !required,
         }
+    }
+
+    pub fn map(mut self, map: bool) -> TypeName {
+        self.map = map;
+        self
     }
 
     pub fn array(mut self, arr: bool) -> TypeName {
@@ -111,6 +118,8 @@ impl TypeName {
         let mut base = self.base.clone();
         if self.vec {
             base = format!("Vec<{}>", base);
+        } else if self.map {
+            base = format!("Map<{}>", base);
         } else if self.boxed {
             base = format!("Box<{}>", base);
         }
