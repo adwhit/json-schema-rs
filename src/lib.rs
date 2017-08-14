@@ -29,7 +29,7 @@ use render::*;
 
 #[allow(unused_doc_comment)]
 mod errors {
-    use ::simple_codegen::errors as codegen;
+    use simple_codegen::errors as codegen;
     error_chain!{
         links {
             Codegen(codegen::Error, codegen::ErrorKind);
@@ -241,14 +241,17 @@ impl Schema {
                             .unwrap_or(HashSet::new());
                         let fields =
                             gather_definitions_map(&props, &uri.join("properties"), root, map)?;
-                        Object { required, fields }
+                        if fields.len() == 0 {
+                            Untyped
+                        } else {
+                            Object { required, fields }
+                        }
                     } else {
                         Untyped // Default
                     }
                 }
             }
         };
-        println!("URI: {}", uri);
         if map.insert(uri.clone(), meta).is_some() {
             bail!("Uri {} already present in schema map", uri)
         }
@@ -263,15 +266,15 @@ fn render_all_of(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Renderable>
             mapget(map, &uri)?
                 .resolve(map)?
                 .to_renderable(&uri, map)
-                .map(|renderable| match renderable {
+                .and_then(|renderable| match renderable {
                     Renderable::Struct(struct_) => {
                         fields.extend(struct_.fields);
                         Ok(())
                     }
-                    _ => Err(ErrorKind::from("AnyOf members must be objects")),
+                    _ => Err(ErrorKind::from("AllOf members must be objects").into()),
                 })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<()>>>()?;
     {
         let mut fieldcheck = HashSet::new();
         fields
@@ -463,7 +466,8 @@ impl MetaSchema {
                         mapget(map, &uri).and_then(|elem| {
                             typedef_name(uri, elem, true, map).and_then(|typename| {
                                 // TODO decide where make_valid_identifier should be called
-                                let name = make_valid_identifier(&typename.apply_modifiers())?.into_owned();
+                                let name = make_valid_identifier(&typename.apply_modifiers())?
+                                    .into_owned();
                                 Ok(Variant::new(name, vec![], Some(typename))?)
                             })
                         })
@@ -473,7 +477,7 @@ impl MetaSchema {
             }
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
-                render_all_of(uris, &uri, map)
+                render_all_of(uris, &uri, map).chain_err(|| format!("Failed to render {}", uri))
             }
             Enum(ref variants) => {
                 let name = uri.to_type_name()?;
