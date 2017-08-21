@@ -10,8 +10,11 @@ extern crate regex;
 #[macro_use]
 extern crate quote;
 extern crate simple_codegen;
+#[macro_use]
+extern crate lazy_static;
 
-use simple_codegen::utils::{rust_format, make_valid_identifier};
+use simple_codegen::utils::{rust_format};
+use simple_codegen::{Id, Type, Primitive};
 
 use std::fs::File;
 use std::path::Path;
@@ -46,7 +49,9 @@ mod errors {
 mod schema;
 mod render;
 
-const GENERIC_TYPE: &str = "JsonValue";
+lazy_static! {
+    static ref GENERIC_TYPE: Type = Type::named("JsonValue").unwrap();
+}
 
 type SchemaMap = BTreeMap<Uri, MetaSchema>;
 
@@ -137,7 +142,7 @@ impl Uri {
         }
     }
 
-    fn to_type_name(&self) -> Result<String> {
+    fn to_type_name(&self) -> Result<Id> {
         use Identified::*;
         let name = match self.identify() {
             Definition(def) => def.to_pascal_case(),
@@ -153,7 +158,7 @@ impl Uri {
             AllOf | AnyOf | OneOf => return self.strip_right().to_type_name(),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
         };
-        Ok(make_valid_identifier(&name)?.into_owned())
+        Ok(Id::valid(name)?)
     }
 }
 
@@ -213,9 +218,9 @@ impl Schema {
                 .unwrap_or(Ok(ST::Object))?;
             match st {
                 ST::Boolean => Primitive(PrimEnum::Boolean),
-                ST::Integer => Primitive(PrimEnum::Integer),
+                ST::Integer => Primitive(PrimEnum::I64),
                 ST::Null => Primitive(PrimEnum::Null),
-                ST::Number => Primitive(PrimEnum::Number),
+                ST::Number => Primitive(PrimEnum::F64),
                 ST::String => Primitive(PrimEnum::String),
                 ST::Array => {
                     let uri = self.items
@@ -401,28 +406,6 @@ fn collect_renderable_definitions(map: &SchemaMap) -> Vec<(&Uri, &MetaSchema)> {
         .collect()
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Deserialize, Serialize)]
-enum Primitive {
-    Null,
-    Boolean,
-    Integer,
-    Number,
-    String,
-}
-
-impl Primitive {
-    fn native(&self) -> &str {
-        use Primitive::*;
-        match *self {
-            Null => "()",
-            Boolean => "bool",
-            Integer => "i64",
-            Number => "f64",
-            String => "String",
-        }
-    }
-}
-
 #[derive(Clone, PartialEq, Debug)]
 enum MetaSchema {
     Reference(Uri),
@@ -460,20 +443,20 @@ impl MetaSchema {
                 Ok(Renderable::Alias(Alias::new(name, inner, tags)))
             }
             AnyOf(ref uris) | OneOf(ref uris) => {
-                let name = uri.to_type_name()?;
-                let variants = uris.iter()
-                    .map(|uri| {
-                        mapget(map, &uri).and_then(|elem| {
-                            typedef_name(uri, elem, true, map).and_then(|typename| {
-                                // TODO decide where make_valid_identifier should be called
-                                let name = make_valid_identifier(&typename.apply_modifiers())?
-                                    .into_owned();
-                                Ok(Variant::new(name, vec![], Some(typename))?)
-                            })
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(Renderable::Enum(EnumType::new(name, vec![], variants)?))
+                unimplemented!()
+                // let name = uri.to_type_name()?;
+                // let variants = uris.iter()
+                //     .map(|uri| {
+                //         mapget(map, &uri).and_then(|elem| {
+                //             typedef_name(uri, elem, true, map).and_then(|typename| {
+                //                 let name = make_valid_identifier(&typename.apply_modifiers())?
+                //                     .into_owned();
+                //                 Ok(Variant::new(name, vec![], Some(typename))?)
+                //             })
+                //         })
+                //     })
+                //     .collect::<Result<Vec<_>>>()?;
+                // Ok(Renderable::Enum(EnumType::new(name, vec![], variants)?))
             }
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
@@ -529,24 +512,24 @@ fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
 /// Fetch the name of the type referred to by the metaschema
 /// e.g. for "type MyVec = Vec<Data>", 'Vec<Data>' is the typedef name.
 /// The name will be inferred from the uri if necessary
-fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<TypeName> {
+fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<Type> {
     use MetaSchema::*;
     match *meta {
         Reference(ref uri) => {
             mapget(map, uri).and_then(|deref| typedef_name(uri, deref, required, map))
         }
-        Primitive(prim) => Ok(TypeName::new(prim.native().into(), required)),
+        Primitive(prim) => Ok(Type::Primitive(prim).optional(!required)),
         Array(Some(ref items_uri)) => {
             let meta = mapget(map, items_uri)?;
-            Ok(typedef_name(items_uri, meta, required, map)?.array(true))
+            Ok(Type::Vec(Box::new(typedef_name(items_uri, meta, required, map)?)))
         }
         Map(ref items_uri) => {
             let meta = mapget(map, items_uri)?;
-            Ok(typedef_name(items_uri, meta, required, map)?.map(true))
+            Ok(Type::Map(Box::new(typedef_name(items_uri, meta, required, map)?)))
         }
-        Array(None) => Ok(TypeName::new(GENERIC_TYPE.into(), required).array(true)),
-        Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), required)),
-        Object { .. } | _ => Ok(TypeName::new(uri.to_type_name()?, required)),
+        Array(None) => Ok(Type::Vec(Box::new(GENERIC_TYPE.clone())).optional(!required)),
+        Untyped => Ok(GENERIC_TYPE.optional(!required)),
+        Object { .. } | _ => Ok(Type::Named(uri.to_type_name()?).optional(!required)),
     }
 }
 

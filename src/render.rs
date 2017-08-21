@@ -2,7 +2,6 @@ use quote::{Tokens, ToTokens, Ident};
 use inflector::Inflector;
 
 use errors::*;
-use make_valid_identifier;
 const HEADER: &str = "use ::serde_json::Value as JsonValue;";
 
 #[derive(Clone, PartialEq, Debug)]
@@ -24,18 +23,19 @@ fn strings_to_tokens(strings: Vec<String>) -> Vec<Tokens> {
 
 impl Variant {
     pub(crate) fn new(name: String, tags: Vec<String>, type_: Option<TypeName>) -> Result<Variant> {
-        let mut tags = strings_to_tokens(tags);
-        let pascal = make_valid_identifier(&name.to_pascal_case())?.into_owned();
-        if type_.is_none() && name != pascal {
-            tags.push(quote! {
-                #[serde(rename = #name)]
-            })
-        }
-        Ok(Variant {
-            name: Ident::from(pascal),
-            tags,
-            type_,
-        })
+        unimplemented!()
+        // let mut tags = strings_to_tokens(tags);
+        // let pascal = make_valid_identifier(&name.to_pascal_case())?.into_owned();
+        // if type_.is_none() && name != pascal {
+        //     tags.push(quote! {
+        //         #[serde(rename = #name)]
+        //     })
+        // }
+        // Ok(Variant {
+        //     name: Ident::from(pascal),
+        //     tags,
+        //     type_,
+        // })
     }
 }
 
@@ -180,18 +180,19 @@ pub(crate) struct Field {
 
 impl Field {
     pub(crate) fn new(name: String, typename: TypeName, tags: Vec<String>) -> Result<Field> {
-        let mut tags = strings_to_tokens(tags);
-        let snake = make_valid_identifier(&name.to_snake_case())?.into_owned();
-        if name != snake {
-            tags.push(quote! {
-                #[serde(rename = #name)]
-            })
-        }
-        Ok(Field {
-            name: Ident::from(snake),
-            typename,
-            tags,
-        })
+        unimplemented!()
+        // let mut tags = strings_to_tokens(tags);
+        // let snake = make_valid_identifier(&name.to_snake_case())?.into_owned();
+        // if name != snake {
+        //     tags.push(quote! {
+        //         #[serde(rename = #name)]
+        //     })
+        // }
+        // Ok(Field {
+        //     name: Ident::from(snake),
+        //     typename,
+        //     tags,
+        // })
     }
 }
 
