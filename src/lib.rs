@@ -420,24 +420,23 @@ impl MetaSchema {
         match *self {
             Map(_) | Primitive(_) | Reference(_) | Array(_) | Untyped => {
                 let name = uri.to_ident()?;
-                let inner = typedef_name(uri, self, true, map)?;
+                let inner = typedef(uri, self, true, map)?;
                 Ok(Box::new(Alias::new(name, Visibility::Public, inner)))
             }
             AnyOf(ref uris) | OneOf(ref uris) => {
-                unimplemented!()
-                // let name = uri.to_ident()?;
-                // let variants = uris.iter()
-                //     .map(|uri| {
-                //         mapget(map, &uri).and_then(|elem| {
-                //             typedef_name(uri, elem, true, map).and_then(|typename| {
-                //                 let name = make_valid_identifier(&typename.apply_modifiers())?
-                //                     .into_owned();
-                //                 Ok(Variant::new(name, vec![], Some(typename))?)
-                //             })
-                //         })
-                //     })
-                //     .collect::<Result<Vec<_>>>()?;
-                // Ok(EnumType::new(name, vec![], variants)?)
+                let name = uri.to_ident()?;
+                let variants = uris.iter()
+                    .map(|uri| {
+                        mapget(map, &uri).and_then(|elem| {
+                            typedef(uri, elem, true, map).and_then(|typ| {
+                                let name = Id::valid(typ.to_string())?;
+                                Ok(Variant::new(name, Some(typ), vec![]))
+                            })
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let attrs = Attributes::default().custom(&["serde(untagged)".into()]);
+                Ok(Box::new(EnumType::new(name, Visibility::Public, attrs, variants)))
             }
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
@@ -474,7 +473,7 @@ fn object_to_struct(
         .map(|(field_name, uri)| {
             let metaschema = mapget(map, &uri)?;
             let is_required = required_keys.contains(field_name);
-            let typ = typedef_name(uri, metaschema, is_required, map)?;
+            let typ = typedef(uri, metaschema, is_required, map)?;
             Ok(Field::with_rename(field_name.as_str(), typ)?)
         })
         .collect::<Result<Vec<Field>>>()?;
@@ -495,23 +494,23 @@ fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
 /// Fetch the name of the type referred to by the metaschema
 /// e.g. for "type MyVec = Vec<Data>", 'Vec<Data>' is the typedef name.
 /// The name will be inferred from the uri if necessary
-fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<Type> {
+fn typedef(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<Type> {
     use MetaSchema::*;
     match *meta {
         Reference(ref uri) => {
-            mapget(map, uri).and_then(|deref| typedef_name(uri, deref, required, map))
+            mapget(map, uri).and_then(|deref| typedef(uri, deref, required, map))
         }
         Primitive(prim) => Ok(Type::Primitive(prim).optional(!required)),
         Array(Some(ref items_uri)) => {
             let meta = mapget(map, items_uri)?;
             Ok(Type::Vec(
-                Box::new(typedef_name(items_uri, meta, required, map)?),
+                Box::new(typedef(items_uri, meta, required, map)?),
             ))
         }
         Map(ref items_uri) => {
             let meta = mapget(map, items_uri)?;
             Ok(Type::Map(
-                Box::new(typedef_name(items_uri, meta, required, map)?),
+                Box::new(typedef(items_uri, meta, required, map)?),
             ))
         }
         Array(None) => Ok(Type::Vec(Box::new(GENERIC_TYPE.clone())).optional(
