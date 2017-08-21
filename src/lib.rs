@@ -8,7 +8,6 @@ extern crate serde_yaml;
 extern crate inflector;
 extern crate regex;
 #[macro_use]
-extern crate quote;
 extern crate simple_codegen;
 #[macro_use]
 extern crate lazy_static;
@@ -23,7 +22,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::ops::Deref;
 
-use quote::{Tokens, ToTokens};
 use inflector::Inflector;
 
 use errors::*;
@@ -567,7 +565,8 @@ mod tests {
     fn test_simple_schema() {
         let root = RootSchema::from_file_yaml("test simple".into(), "test_schemas/simple.yaml")
             .unwrap();
-        root.generate().unwrap();
+        let out = root.generate().unwrap();
+        println!("{}", out);
     }
 
     #[test]
