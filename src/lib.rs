@@ -13,7 +13,7 @@ extern crate simple_codegen;
 #[macro_use]
 extern crate lazy_static;
 
-use simple_codegen::utils::{rust_format};
+use simple_codegen::utils::rust_format;
 use simple_codegen::*;
 
 use std::fs::File;
@@ -188,7 +188,13 @@ impl Schema {
                 .map(|enm| {
                     enm.as_str()
                         .ok_or(ErrorKind::from("enum items must be strings").into())
-                        .and_then(|name| Variant::new(name.to_string(), vec![], None))
+                        .and_then(|name| {
+                            Ok(Variant::new(
+                                Id::valid(name.to_string())?,
+                                None,
+                                vec![],
+                            ))
+                        })
                 })
                 .collect::<Result<Vec<Variant>>>()?;
             Enum(variants)
@@ -264,7 +270,7 @@ impl Schema {
     }
 }
 
-fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Struct> {
+fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Box<Item>> {
     unimplemented!()
     // let mut fields = Vec::new();
     // uris.iter()
@@ -373,11 +379,11 @@ impl RootSchema {
 
     pub fn generate(&self) -> Result<String> {
         let items = self.make_items()?;
-        let out = String::new();
-        for i in items() {
+        let mut out = String::new();
+        for i in items {
             out += &i.to_string();
         }
-        Ok(rust_format(out))
+        Ok(rust_format(&out)?)
     }
 }
 
@@ -454,17 +460,21 @@ impl MetaSchema {
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
                 all_of_to_struct(uris, &uri, map)
-                    .map(|strct| Box::new(strct))
                     .chain_err(|| format!("Failed to render {}", uri))
             }
             Enum(ref variants) => {
                 let name = uri.to_type_name()?;
-                Ok(Box::new(Enum::new(name, Visibility::Public, vec![], variants.clone())),
+                Ok(Box::new(EnumType::new(
+                    name,
+                    Visibility::Public,
+                    Attributes::default(),
+                    variants.clone(),
+                )))
             }
             Object {
                 ref required,
                 ref fields,
-            } => object_to_struct(uri, required, fields, map),
+            } => object_to_struct(uri, required, fields, map).map(|s| Box::new(s) as Box<Item>)
         }
     }
 }
@@ -486,8 +496,12 @@ fn object_to_struct(
             Ok(Field::with_rename(id, typ))
         })
         .collect::<Result<Vec<Field>>>()?;
-    let tags = vec![];
-    Ok(Struct::new(name,Visibility::Public, tags, fields))
+    Ok(Struct::new(
+        name,
+        Visibility::Public,
+        Attributes::default(),
+        fields,
+    ))
 }
 
 fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
@@ -508,14 +522,20 @@ fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -
         Primitive(prim) => Ok(Type::Primitive(prim).optional(!required)),
         Array(Some(ref items_uri)) => {
             let meta = mapget(map, items_uri)?;
-            Ok(Type::Vec(Box::new(typedef_name(items_uri, meta, required, map)?)))
+            Ok(Type::Vec(
+                Box::new(typedef_name(items_uri, meta, required, map)?),
+            ))
         }
         Map(ref items_uri) => {
             let meta = mapget(map, items_uri)?;
-            Ok(Type::Map(Box::new(typedef_name(items_uri, meta, required, map)?)))
+            Ok(Type::Map(
+                Box::new(typedef_name(items_uri, meta, required, map)?),
+            ))
         }
-        Array(None) => Ok(Type::Vec(Box::new(GENERIC_TYPE.clone())).optional(!required)),
-        Untyped => Ok(GENERIC_TYPE.optional(!required)),
+        Array(None) => Ok(Type::Vec(Box::new(GENERIC_TYPE.clone())).optional(
+            !required,
+        )),
+        Untyped => Ok(GENERIC_TYPE.clone().optional(!required)),
         Object { .. } | _ => Ok(Type::Named(uri.to_type_name()?).optional(!required)),
     }
 }
