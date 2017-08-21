@@ -68,12 +68,13 @@ pub(crate) enum Renderable {
 
 impl ToTokens for Renderable {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        use Renderable::*;
-        match *self {
-            Alias(ref elem) => elem.to_tokens(tokens),
-            Struct(ref elem) => elem.to_tokens(tokens),
-            Enum(ref elem) => elem.to_tokens(tokens),
-        }
+        unimplemented!()
+        // use Renderable::*;
+        // match *self {
+        //     Alias(ref elem) => elem.to_tokens(tokens),
+        //     Struct(ref elem) => elem.to_tokens(tokens),
+        //     Enum(ref elem) => elem.to_tokens(tokens),
+        // }
     }
 }
 

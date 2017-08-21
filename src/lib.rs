@@ -14,7 +14,7 @@ extern crate simple_codegen;
 extern crate lazy_static;
 
 use simple_codegen::utils::{rust_format};
-use simple_codegen::{Id, Type, Primitive};
+use simple_codegen::*;
 
 use std::fs::File;
 use std::path::Path;
@@ -28,7 +28,7 @@ use inflector::Inflector;
 
 use errors::*;
 use schema::*;
-use render::*;
+//use render::*;
 
 #[allow(unused_doc_comment)]
 mod errors {
@@ -47,7 +47,7 @@ mod errors {
 }
 
 mod schema;
-mod render;
+//mod render;
 
 lazy_static! {
     static ref GENERIC_TYPE: Type = Type::named("JsonValue").unwrap();
@@ -264,36 +264,37 @@ impl Schema {
     }
 }
 
-fn render_all_of(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
-    let mut fields = Vec::new();
-    uris.iter()
-        .map(|uri| {
-            mapget(map, &uri)?
-                .resolve(map)?
-                .to_renderable(&uri, map)
-                .and_then(|renderable| match renderable {
-                    Renderable::Struct(struct_) => {
-                        fields.extend(struct_.fields);
-                        Ok(())
-                    }
-                    _ => Err(ErrorKind::from("AllOf members must be objects").into()),
-                })
-        })
-        .collect::<Result<Vec<()>>>()?;
-    {
-        let mut fieldcheck = HashSet::new();
-        fields
-            .iter()
-            .map(|field| if !fieldcheck.insert(&field.name) {
-                bail!("anyOf duplicate field '{}' for {}", field.name, uri)
-            } else {
-                Ok(())
-            })
-            .collect::<Result<Vec<_>>>()?;
-    }
-    let name = uri.to_type_name()?;
-    let tags = vec![];
-    Ok(Renderable::Struct(Struct::new(name, tags, fields)))
+fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Struct> {
+    unimplemented!()
+    // let mut fields = Vec::new();
+    // uris.iter()
+    //     .map(|uri| {
+    //         mapget(map, &uri)?
+    //             .resolve(map)?
+    //             .to_item(&uri, map)
+    //             .and_then(|renderable| match renderable {
+    //                 Renderable::Struct(struct_) => {
+    //                     fields.extend(struct_.fields);
+    //                     Ok(())
+    //                 }
+    //                 _ => Err(ErrorKind::from("AllOf members must be objects").into()),
+    //             })
+    //     })
+    //     .collect::<Result<Vec<()>>>()?;
+    // {
+    //     let mut fieldcheck = HashSet::new();
+    //     fields
+    //         .iter()
+    //         .map(|field| if !fieldcheck.insert(&field.name) {
+    //             bail!("anyOf duplicate field '{}' for {}", field.name, uri)
+    //         } else {
+    //             Ok(())
+    //         })
+    //         .collect::<Result<Vec<_>>>()?;
+    // }
+    // let name = uri.to_type_name()?;
+    // let tags = vec![];
+    // Ok(Renderable::Struct(Struct::new(name, tags, fields)))
 }
 
 fn gather_definitions_map(
@@ -361,33 +362,26 @@ impl RootSchema {
         Ok(map)
     }
 
-    fn make_renderables(&self) -> Result<Vec<Renderable>> {
+    fn make_items(&self) -> Result<Vec<Box<Item>>> {
         let map = self.gather_definitions()?;
-        let defns = collect_renderable_definitions(&map);
+        let defns = collect_definitions_to_render(&map);
         defns
             .iter()
-            .map(|&(uri, metaschema)| metaschema.to_renderable(uri, &map))
+            .map(|&(uri, metaschema)| metaschema.to_item(uri, &map))
             .collect()
     }
 
     pub fn generate(&self) -> Result<String> {
-        let renderables = self.make_renderables()?;
-        let tokens = render_all(&renderables);
-        Ok(rust_format(tokens.as_str())?)
+        let items = self.make_items()?;
+        let out = String::new();
+        for i in items() {
+            out += &i.to_string();
+        }
+        Ok(rust_format(out))
     }
 }
 
-fn render_all(renderables: &[Renderable]) -> Tokens {
-    renderables.iter().fold(
-        Tokens::new(),
-        |mut tokens, renderable| {
-            renderable.to_tokens(&mut tokens);
-            tokens
-        },
-    )
-}
-
-fn collect_renderable_definitions(map: &SchemaMap) -> Vec<(&Uri, &MetaSchema)> {
+fn collect_definitions_to_render(map: &SchemaMap) -> Vec<(&Uri, &MetaSchema)> {
     // Filter out schemas which are just references to other schemas
     use MetaSchema::*;
     map.iter()
@@ -432,15 +426,14 @@ impl MetaSchema {
         }
     }
 
-    fn to_renderable(&self, uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
+    fn to_item(&self, uri: &Uri, map: &SchemaMap) -> Result<Box<Item>> {
         use Enum as EnumType;
         use MetaSchema::*;
         match *self {
             Map(_) | Primitive(_) | Reference(_) | Array(_) | Untyped => {
                 let name = uri.to_type_name()?;
                 let inner = typedef_name(uri, self, true, map)?;
-                let tags = vec![];
-                Ok(Renderable::Alias(Alias::new(name, inner, tags)))
+                Ok(Box::new(Alias::new(name, Visibility::Public, inner)))
             }
             AnyOf(ref uris) | OneOf(ref uris) => {
                 unimplemented!()
@@ -460,47 +453,41 @@ impl MetaSchema {
             }
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
-                render_all_of(uris, &uri, map).chain_err(|| format!("Failed to render {}", uri))
+                all_of_to_struct(uris, &uri, map)
+                    .map(|strct| Box::new(strct))
+                    .chain_err(|| format!("Failed to render {}", uri))
             }
             Enum(ref variants) => {
                 let name = uri.to_type_name()?;
-                Ok(Renderable::Enum(
-                    EnumType::new(name, vec![], variants.clone())?,
-                ))
+                Ok(Box::new(Enum::new(name, Visibility::Public, vec![], variants.clone())),
             }
             Object {
                 ref required,
                 ref fields,
-            } => renderable_object(uri, required, fields, map),
+            } => object_to_struct(uri, required, fields, map),
         }
     }
 }
 
-fn renderable_object(
+fn object_to_struct(
     uri: &Uri,
     required_keys: &HashSet<String>,
     field_map: &Map<Uri>,
     map: &SchemaMap,
-) -> Result<Renderable> {
+) -> Result<Struct> {
     let name = uri.to_type_name()?;
     let fields = field_map
         .iter()
         .map(|(field_name, uri)| {
             let metaschema = mapget(map, &uri)?;
             let is_required = required_keys.contains(field_name);
-            let tags = vec![];
-            let typename = typedef_name(uri, metaschema, is_required, map)?.boxed(
-                &name,
-            );
-            Ok(Field::new(field_name.clone(), typename, tags).chain_err(
-                || {
-                    format!("Failed to create field {} at uri {}", field_name, uri)
-                },
-            )?)
+            let typ = typedef_name(uri, metaschema, is_required, map)?;
+            let id = Id::new(field_name.clone())?;
+            Ok(Field::with_rename(id, typ))
         })
         .collect::<Result<Vec<Field>>>()?;
     let tags = vec![];
-    Ok(Renderable::Struct(Struct::new(name, tags, fields)))
+    Ok(Struct::new(name,Visibility::Public, tags, fields))
 }
 
 fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
