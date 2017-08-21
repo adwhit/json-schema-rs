@@ -185,11 +185,7 @@ impl Schema {
                     enm.as_str()
                         .ok_or(ErrorKind::from("enum items must be strings").into())
                         .and_then(|name| {
-                            Ok(Variant::new(
-                                Id::valid(name.to_string())?,
-                                None,
-                                vec![],
-                            ))
+                            Ok(Variant::new(Id::valid(name.to_string())?, None, vec![]))
                         })
                 })
                 .collect::<Result<Vec<Variant>>>()?;
@@ -268,21 +264,25 @@ impl Schema {
 
 fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Struct> {
     let structs = uris.iter()
-        .map(|field_uri| {
-            match mapget(map, &field_uri)?.resolve(map)? {
-                &MetaSchema::Object { ref required, ref fields } => {
-                    object_to_struct(field_uri, required, fields, map)
-                }
-                &MetaSchema::AllOf(ref uris) => {
-                    let nexturi = uri.join("allOf");
-                    all_of_to_struct(uris, &nexturi, map)
-                }
-                _ => Err(ErrorKind::from("AllOf members must be objects").into())
+        .map(|field_uri| match mapget(map, &field_uri)?.resolve(map)? {
+            &MetaSchema::Object {
+                ref required,
+                ref fields,
+            } => object_to_struct(field_uri, required, fields, map),
+            &MetaSchema::AllOf(ref uris) => {
+                let nexturi = uri.join("allOf");
+                all_of_to_struct(uris, &nexturi, map)
             }
+            _ => Err(ErrorKind::from("AllOf members must be objects").into()),
         })
         .collect::<Result<Vec<Struct>>>()?;
     let name = uri.to_ident()?;
-    Ok(Struct::merge(name, Visibility::Public, Attributes::default(), &structs)?)
+    Ok(Struct::merge(
+        name,
+        Visibility::Public,
+        Attributes::default(),
+        &structs,
+    )?)
 }
 
 fn gather_definitions_map(
@@ -436,7 +436,9 @@ impl MetaSchema {
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let attrs = Attributes::default().custom(&["serde(untagged)".into()]);
-                Ok(Box::new(EnumType::new(name, Visibility::Public, attrs, variants)))
+                Ok(Box::new(
+                    EnumType::new(name, Visibility::Public, attrs, variants),
+                ))
             }
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
@@ -456,7 +458,7 @@ impl MetaSchema {
             Object {
                 ref required,
                 ref fields,
-            } => object_to_struct(uri, required, fields, map).map(|s| Box::new(s) as Box<Item>)
+            } => object_to_struct(uri, required, fields, map).map(|s| Box::new(s) as Box<Item>),
         }
     }
 }
@@ -497,9 +499,7 @@ fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
 fn typedef(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<Type> {
     use MetaSchema::*;
     match *meta {
-        Reference(ref uri) => {
-            mapget(map, uri).and_then(|deref| typedef(uri, deref, required, map))
-        }
+        Reference(ref uri) => mapget(map, uri).and_then(|deref| typedef(uri, deref, required, map)),
         Primitive(prim) => Ok(Type::Primitive(prim).optional(!required)),
         Array(Some(ref items_uri)) => {
             let meta = mapget(map, items_uri)?;
