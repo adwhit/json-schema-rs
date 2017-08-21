@@ -8,10 +8,12 @@ extern crate serde_yaml;
 extern crate inflector;
 extern crate regex;
 #[macro_use]
-extern crate quote;
 extern crate simple_codegen;
+#[macro_use]
+extern crate lazy_static;
 
-use simple_codegen::utils::{rust_format, make_valid_identifier};
+use simple_codegen::utils::rust_format;
+use simple_codegen::*;
 
 use std::fs::File;
 use std::path::Path;
@@ -20,12 +22,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::ops::Deref;
 
-use quote::{Tokens, ToTokens};
 use inflector::Inflector;
 
 use errors::*;
 use schema::*;
-use render::*;
 
 #[allow(unused_doc_comment)]
 mod errors {
@@ -44,9 +44,10 @@ mod errors {
 }
 
 mod schema;
-mod render;
 
-const GENERIC_TYPE: &str = "JsonValue";
+lazy_static! {
+    static ref GENERIC_TYPE: Type = Type::named("JsonValue").unwrap();
+}
 
 type SchemaMap = BTreeMap<Uri, MetaSchema>;
 
@@ -137,7 +138,7 @@ impl Uri {
         }
     }
 
-    fn to_type_name(&self) -> Result<String> {
+    fn to_ident(&self) -> Result<Id> {
         use Identified::*;
         let name = match self.identify() {
             Definition(def) => def.to_pascal_case(),
@@ -145,15 +146,15 @@ impl Uri {
             Property(prop) => {
                 format!(
                     "{}{}",
-                    self.strip_right().strip_right().to_type_name()?,
+                    self.strip_right().strip_right().to_ident()?,
                     prop.to_pascal_case()
                 )
             }
             AllOfEntry => "XXX This should never be rendered".into(),
-            AllOf | AnyOf | OneOf => return self.strip_right().to_type_name(),
+            AllOf | AnyOf | OneOf => return self.strip_right().to_ident(),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
         };
-        Ok(make_valid_identifier(&name)?.into_owned())
+        Ok(Id::valid(name)?)
     }
 }
 
@@ -183,7 +184,13 @@ impl Schema {
                 .map(|enm| {
                     enm.as_str()
                         .ok_or(ErrorKind::from("enum items must be strings").into())
-                        .and_then(|name| Variant::new(name.to_string(), vec![], None))
+                        .and_then(|name| {
+                            Ok(Variant::new(
+                                Id::valid(name.to_string())?,
+                                None,
+                                vec![],
+                            ))
+                        })
                 })
                 .collect::<Result<Vec<Variant>>>()?;
             Enum(variants)
@@ -213,9 +220,9 @@ impl Schema {
                 .unwrap_or(Ok(ST::Object))?;
             match st {
                 ST::Boolean => Primitive(PrimEnum::Boolean),
-                ST::Integer => Primitive(PrimEnum::Integer),
+                ST::Integer => Primitive(PrimEnum::I64),
                 ST::Null => Primitive(PrimEnum::Null),
-                ST::Number => Primitive(PrimEnum::Number),
+                ST::Number => Primitive(PrimEnum::F64),
                 ST::String => Primitive(PrimEnum::String),
                 ST::Array => {
                     let uri = self.items
@@ -259,36 +266,23 @@ impl Schema {
     }
 }
 
-fn render_all_of(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
-    let mut fields = Vec::new();
-    uris.iter()
-        .map(|uri| {
-            mapget(map, &uri)?
-                .resolve(map)?
-                .to_renderable(&uri, map)
-                .and_then(|renderable| match renderable {
-                    Renderable::Struct(struct_) => {
-                        fields.extend(struct_.fields);
-                        Ok(())
-                    }
-                    _ => Err(ErrorKind::from("AllOf members must be objects").into()),
-                })
+fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Struct> {
+    let structs = uris.iter()
+        .map(|field_uri| {
+            match mapget(map, &field_uri)?.resolve(map)? {
+                &MetaSchema::Object { ref required, ref fields } => {
+                    object_to_struct(field_uri, required, fields, map)
+                }
+                &MetaSchema::AllOf(ref uris) => {
+                    let nexturi = uri.join("allOf");
+                    all_of_to_struct(uris, &nexturi, map)
+                }
+                _ => Err(ErrorKind::from("AllOf members must be objects").into())
+            }
         })
-        .collect::<Result<Vec<()>>>()?;
-    {
-        let mut fieldcheck = HashSet::new();
-        fields
-            .iter()
-            .map(|field| if !fieldcheck.insert(&field.name) {
-                bail!("anyOf duplicate field '{}' for {}", field.name, uri)
-            } else {
-                Ok(())
-            })
-            .collect::<Result<Vec<_>>>()?;
-    }
-    let name = uri.to_type_name()?;
-    let tags = vec![];
-    Ok(Renderable::Struct(Struct::new(name, tags, fields)))
+        .collect::<Result<Vec<Struct>>>()?;
+    let name = uri.to_ident()?;
+    Ok(Struct::merge(name, Visibility::Public, Attributes::default(), &structs)?)
 }
 
 fn gather_definitions_map(
@@ -356,33 +350,26 @@ impl RootSchema {
         Ok(map)
     }
 
-    fn make_renderables(&self) -> Result<Vec<Renderable>> {
+    fn make_items(&self) -> Result<Vec<Box<Item>>> {
         let map = self.gather_definitions()?;
-        let defns = collect_renderable_definitions(&map);
+        let defns = collect_definitions_to_render(&map);
         defns
             .iter()
-            .map(|&(uri, metaschema)| metaschema.to_renderable(uri, &map))
+            .map(|&(uri, metaschema)| metaschema.to_item(uri, &map))
             .collect()
     }
 
     pub fn generate(&self) -> Result<String> {
-        let renderables = self.make_renderables()?;
-        let tokens = render_all(&renderables);
-        Ok(rust_format(tokens.as_str())?)
+        let items = self.make_items()?;
+        let mut out = String::new();
+        for i in items {
+            out += &i.to_string();
+        }
+        Ok(rust_format(&out)?)
     }
 }
 
-fn render_all(renderables: &[Renderable]) -> Tokens {
-    renderables.iter().fold(
-        Tokens::new(),
-        |mut tokens, renderable| {
-            renderable.to_tokens(&mut tokens);
-            tokens
-        },
-    )
-}
-
-fn collect_renderable_definitions(map: &SchemaMap) -> Vec<(&Uri, &MetaSchema)> {
+fn collect_definitions_to_render(map: &SchemaMap) -> Vec<(&Uri, &MetaSchema)> {
     // Filter out schemas which are just references to other schemas
     use MetaSchema::*;
     map.iter()
@@ -399,28 +386,6 @@ fn collect_renderable_definitions(map: &SchemaMap) -> Vec<(&Uri, &MetaSchema)> {
             }
         })
         .collect()
-}
-
-#[derive(Clone, Copy, PartialEq, Debug, Deserialize, Serialize)]
-enum Primitive {
-    Null,
-    Boolean,
-    Integer,
-    Number,
-    String,
-}
-
-impl Primitive {
-    fn native(&self) -> &str {
-        use Primitive::*;
-        match *self {
-            Null => "()",
-            Boolean => "bool",
-            Integer => "i64",
-            Number => "f64",
-            String => "String",
-        }
-    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -449,75 +414,75 @@ impl MetaSchema {
         }
     }
 
-    fn to_renderable(&self, uri: &Uri, map: &SchemaMap) -> Result<Renderable> {
+    fn to_item(&self, uri: &Uri, map: &SchemaMap) -> Result<Box<Item>> {
         use Enum as EnumType;
         use MetaSchema::*;
         match *self {
             Map(_) | Primitive(_) | Reference(_) | Array(_) | Untyped => {
-                let name = uri.to_type_name()?;
-                let inner = typedef_name(uri, self, true, map)?;
-                let tags = vec![];
-                Ok(Renderable::Alias(Alias::new(name, inner, tags)))
+                let name = uri.to_ident()?;
+                let inner = typedef(uri, self, true, map)?;
+                Ok(Box::new(Alias::new(name, Visibility::Public, inner)))
             }
             AnyOf(ref uris) | OneOf(ref uris) => {
-                let name = uri.to_type_name()?;
+                let name = uri.to_ident()?;
                 let variants = uris.iter()
                     .map(|uri| {
                         mapget(map, &uri).and_then(|elem| {
-                            typedef_name(uri, elem, true, map).and_then(|typename| {
-                                // TODO decide where make_valid_identifier should be called
-                                let name = make_valid_identifier(&typename.apply_modifiers())?
-                                    .into_owned();
-                                Ok(Variant::new(name, vec![], Some(typename))?)
+                            typedef(uri, elem, true, map).and_then(|typ| {
+                                let name = Id::valid(typ.to_string())?;
+                                Ok(Variant::new(name, Some(typ), vec![]))
                             })
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
-                Ok(Renderable::Enum(EnumType::new(name, vec![], variants)?))
+                let attrs = Attributes::default().custom(&["serde(untagged)".into()]);
+                Ok(Box::new(EnumType::new(name, Visibility::Public, attrs, variants)))
             }
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
-                render_all_of(uris, &uri, map).chain_err(|| format!("Failed to render {}", uri))
+                all_of_to_struct(uris, &uri, map)
+                    .chain_err(|| format!("Failed to render {}", uri))
+                    .map(|s| Box::new(s) as Box<Item>)
             }
             Enum(ref variants) => {
-                let name = uri.to_type_name()?;
-                Ok(Renderable::Enum(
-                    EnumType::new(name, vec![], variants.clone())?,
-                ))
+                let name = uri.to_ident()?;
+                Ok(Box::new(EnumType::new(
+                    name,
+                    Visibility::Public,
+                    Attributes::default(),
+                    variants.clone(),
+                )))
             }
             Object {
                 ref required,
                 ref fields,
-            } => renderable_object(uri, required, fields, map),
+            } => object_to_struct(uri, required, fields, map).map(|s| Box::new(s) as Box<Item>)
         }
     }
 }
 
-fn renderable_object(
+fn object_to_struct(
     uri: &Uri,
     required_keys: &HashSet<String>,
     field_map: &Map<Uri>,
     map: &SchemaMap,
-) -> Result<Renderable> {
-    let name = uri.to_type_name()?;
+) -> Result<Struct> {
+    let name = uri.to_ident()?;
     let fields = field_map
         .iter()
         .map(|(field_name, uri)| {
             let metaschema = mapget(map, &uri)?;
             let is_required = required_keys.contains(field_name);
-            let tags = vec![];
-            let typename = typedef_name(uri, metaschema, is_required, map)?.boxed(
-                &name,
-            );
-            Ok(Field::new(field_name.clone(), typename, tags).chain_err(
-                || {
-                    format!("Failed to create field {} at uri {}", field_name, uri)
-                },
-            )?)
+            let typ = typedef(uri, metaschema, is_required, map)?;
+            Ok(Field::with_rename(field_name.as_str(), typ)?)
         })
         .collect::<Result<Vec<Field>>>()?;
-    let tags = vec![];
-    Ok(Renderable::Struct(Struct::new(name, tags, fields)))
+    Ok(Struct::new(
+        name,
+        Visibility::Public,
+        Attributes::default(),
+        fields,
+    ))
 }
 
 fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
@@ -529,24 +494,30 @@ fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
 /// Fetch the name of the type referred to by the metaschema
 /// e.g. for "type MyVec = Vec<Data>", 'Vec<Data>' is the typedef name.
 /// The name will be inferred from the uri if necessary
-fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<TypeName> {
+fn typedef(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<Type> {
     use MetaSchema::*;
     match *meta {
         Reference(ref uri) => {
-            mapget(map, uri).and_then(|deref| typedef_name(uri, deref, required, map))
+            mapget(map, uri).and_then(|deref| typedef(uri, deref, required, map))
         }
-        Primitive(prim) => Ok(TypeName::new(prim.native().into(), required)),
+        Primitive(prim) => Ok(Type::Primitive(prim).optional(!required)),
         Array(Some(ref items_uri)) => {
             let meta = mapget(map, items_uri)?;
-            Ok(typedef_name(items_uri, meta, required, map)?.array(true))
+            Ok(Type::Vec(
+                Box::new(typedef(items_uri, meta, required, map)?),
+            ))
         }
         Map(ref items_uri) => {
             let meta = mapget(map, items_uri)?;
-            Ok(typedef_name(items_uri, meta, required, map)?.map(true))
+            Ok(Type::Map(
+                Box::new(typedef(items_uri, meta, required, map)?),
+            ))
         }
-        Array(None) => Ok(TypeName::new(GENERIC_TYPE.into(), required).array(true)),
-        Untyped => Ok(TypeName::new(GENERIC_TYPE.into(), required)),
-        Object { .. } | _ => Ok(TypeName::new(uri.to_type_name()?, required)),
+        Array(None) => Ok(Type::Vec(Box::new(GENERIC_TYPE.clone())).optional(
+            !required,
+        )),
+        Untyped => Ok(GENERIC_TYPE.clone().optional(!required)),
+        Object { .. } | _ => Ok(Type::Named(uri.to_ident()?).optional(!required)),
     }
 }
 
@@ -564,13 +535,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_uri_to_type_name() {
+    fn test_uri_to_ident() {
         let id1 = Uri::new("root", "#/this/is/some/route/my type");
-        assert_eq!(id1.to_type_name().unwrap(), "RootThisIsSomeRouteMyType");
+        assert_eq!(id1.to_ident().unwrap().deref(), "RootThisIsSomeRouteMyType");
         let id2 = Uri::new("root", "#/properties/aProp");
-        assert_eq!(id2.to_type_name().unwrap(), "RootAprop");
+        assert_eq!(id2.to_ident().unwrap().deref(), "RootAprop");
         let id3 = Uri::new("root", "#");
-        assert_eq!(id3.to_type_name().unwrap(), "Root");
+        assert_eq!(id3.to_ident().unwrap().deref(), "Root");
         // TODO make this work
         // let id4: Uri = "#more".into();
         // assert_eq!(id3.to_name("root"), "More");
@@ -580,7 +551,8 @@ mod tests {
     fn test_simple_schema() {
         let root = RootSchema::from_file_yaml("test simple".into(), "test_schemas/simple.yaml")
             .unwrap();
-        root.generate().unwrap();
+        let out = root.generate().unwrap();
+        println!("{}", out);
     }
 
     #[test]

@@ -67,7 +67,7 @@ definitions:
     oneOf:
       - type: integer
       - type: number
-      - type: array    # TODO This doesn't work
+      - type: array
 
   combine these:
     allOf:
@@ -77,6 +77,8 @@ definitions:
       - properties:
           height:
             type: number
+        required:
+          - height
 
   some enum:
     enum:
