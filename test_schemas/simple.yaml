@@ -50,33 +50,33 @@ definitions:
   AGE:
     type: number
 
-  pick from these:
-    anyOf:
-      - type: integer
-      - type: string
-      - type: object
-        required:
-          - some property here
-        properties:
-          some property here:
-            type: array
-            items:
-              $ref: "#/definitions/AGE"
+  # pick from these:
+  #   anyOf:
+  #     - type: integer
+  #     - type: string
+  #     - type: object
+  #       required:
+  #         - some property here
+  #       properties:
+  #         some property here:
+  #           type: array
+  #           items:
+  #             $ref: "#/definitions/AGE"
 
-  or pick from these:
-    oneOf:
-      - type: integer
-      - type: number
-      - type: array    # TODO This doesn't work
+  # or pick from these:
+  #   oneOf:
+  #     - type: integer
+  #     - type: number
+  #     - type: array    # TODO This doesn't work
 
-  combine these:
-    allOf:
-      - properties:
-          name:
-            type: string
-      - properties:
-          height:
-            type: number
+  # combine these:
+  #   allOf:
+  #     - properties:
+  #         name:
+  #           type: string
+  #     - properties:
+  #         height:
+  #           type: number
 
   some enum:
     enum:

@@ -28,7 +28,6 @@ use inflector::Inflector;
 
 use errors::*;
 use schema::*;
-//use render::*;
 
 #[allow(unused_doc_comment)]
 mod errors {
@@ -47,7 +46,6 @@ mod errors {
 }
 
 mod schema;
-//mod render;
 
 lazy_static! {
     static ref GENERIC_TYPE: Type = Type::named("JsonValue").unwrap();
@@ -492,8 +490,7 @@ fn object_to_struct(
             let metaschema = mapget(map, &uri)?;
             let is_required = required_keys.contains(field_name);
             let typ = typedef_name(uri, metaschema, is_required, map)?;
-            let id = Id::new(field_name.clone())?;
-            Ok(Field::with_rename(id, typ))
+            Ok(Field::with_rename(field_name.as_str(), typ)?)
         })
         .collect::<Result<Vec<Field>>>()?;
     Ok(Struct::new(
@@ -556,11 +553,11 @@ mod tests {
     #[test]
     fn test_uri_to_type_name() {
         let id1 = Uri::new("root", "#/this/is/some/route/my type");
-        assert_eq!(id1.to_type_name().unwrap(), "RootThisIsSomeRouteMyType");
+        assert_eq!(id1.to_type_name().unwrap().deref(), "RootThisIsSomeRouteMyType");
         let id2 = Uri::new("root", "#/properties/aProp");
-        assert_eq!(id2.to_type_name().unwrap(), "RootAprop");
+        assert_eq!(id2.to_type_name().unwrap().deref(), "RootAprop");
         let id3 = Uri::new("root", "#");
-        assert_eq!(id3.to_type_name().unwrap(), "Root");
+        assert_eq!(id3.to_type_name().unwrap().deref(), "Root");
         // TODO make this work
         // let id4: Uri = "#more".into();
         // assert_eq!(id3.to_name("root"), "More");
