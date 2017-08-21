@@ -138,7 +138,7 @@ impl Uri {
         }
     }
 
-    fn to_type_name(&self) -> Result<Id> {
+    fn to_ident(&self) -> Result<Id> {
         use Identified::*;
         let name = match self.identify() {
             Definition(def) => def.to_pascal_case(),
@@ -146,12 +146,12 @@ impl Uri {
             Property(prop) => {
                 format!(
                     "{}{}",
-                    self.strip_right().strip_right().to_type_name()?,
+                    self.strip_right().strip_right().to_ident()?,
                     prop.to_pascal_case()
                 )
             }
             AllOfEntry => "XXX This should never be rendered".into(),
-            AllOf | AnyOf | OneOf => return self.strip_right().to_type_name(),
+            AllOf | AnyOf | OneOf => return self.strip_right().to_ident(),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
         };
         Ok(Id::valid(name)?)
@@ -266,37 +266,23 @@ impl Schema {
     }
 }
 
-fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Box<Item>> {
-    unimplemented!()
-    // let mut fields = Vec::new();
-    // uris.iter()
-    //     .map(|uri| {
-    //         mapget(map, &uri)?
-    //             .resolve(map)?
-    //             .to_item(&uri, map)
-    //             .and_then(|renderable| match renderable {
-    //                 Renderable::Struct(struct_) => {
-    //                     fields.extend(struct_.fields);
-    //                     Ok(())
-    //                 }
-    //                 _ => Err(ErrorKind::from("AllOf members must be objects").into()),
-    //             })
-    //     })
-    //     .collect::<Result<Vec<()>>>()?;
-    // {
-    //     let mut fieldcheck = HashSet::new();
-    //     fields
-    //         .iter()
-    //         .map(|field| if !fieldcheck.insert(&field.name) {
-    //             bail!("anyOf duplicate field '{}' for {}", field.name, uri)
-    //         } else {
-    //             Ok(())
-    //         })
-    //         .collect::<Result<Vec<_>>>()?;
-    // }
-    // let name = uri.to_type_name()?;
-    // let tags = vec![];
-    // Ok(Renderable::Struct(Struct::new(name, tags, fields)))
+fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Struct> {
+    let structs = uris.iter()
+        .map(|field_uri| {
+            match mapget(map, &field_uri)?.resolve(map)? {
+                &MetaSchema::Object { ref required, ref fields } => {
+                    object_to_struct(field_uri, required, fields, map)
+                }
+                &MetaSchema::AllOf(ref uris) => {
+                    let nexturi = uri.join("allOf");
+                    all_of_to_struct(uris, &nexturi, map)
+                }
+                _ => Err(ErrorKind::from("AllOf members must be objects").into())
+            }
+        })
+        .collect::<Result<Vec<Struct>>>()?;
+    let name = uri.to_ident()?;
+    Ok(Struct::merge(name, Visibility::Public, Attributes::default(), &structs)?)
 }
 
 fn gather_definitions_map(
@@ -433,13 +419,13 @@ impl MetaSchema {
         use MetaSchema::*;
         match *self {
             Map(_) | Primitive(_) | Reference(_) | Array(_) | Untyped => {
-                let name = uri.to_type_name()?;
+                let name = uri.to_ident()?;
                 let inner = typedef_name(uri, self, true, map)?;
                 Ok(Box::new(Alias::new(name, Visibility::Public, inner)))
             }
             AnyOf(ref uris) | OneOf(ref uris) => {
                 unimplemented!()
-                // let name = uri.to_type_name()?;
+                // let name = uri.to_ident()?;
                 // let variants = uris.iter()
                 //     .map(|uri| {
                 //         mapget(map, &uri).and_then(|elem| {
@@ -451,15 +437,16 @@ impl MetaSchema {
                 //         })
                 //     })
                 //     .collect::<Result<Vec<_>>>()?;
-                // Ok(Renderable::Enum(EnumType::new(name, vec![], variants)?))
+                // Ok(EnumType::new(name, vec![], variants)?)
             }
             AllOf(ref uris) => {
                 let uri = uri.join("allOf");
                 all_of_to_struct(uris, &uri, map)
                     .chain_err(|| format!("Failed to render {}", uri))
+                    .map(|s| Box::new(s) as Box<Item>)
             }
             Enum(ref variants) => {
-                let name = uri.to_type_name()?;
+                let name = uri.to_ident()?;
                 Ok(Box::new(EnumType::new(
                     name,
                     Visibility::Public,
@@ -481,7 +468,7 @@ fn object_to_struct(
     field_map: &Map<Uri>,
     map: &SchemaMap,
 ) -> Result<Struct> {
-    let name = uri.to_type_name()?;
+    let name = uri.to_ident()?;
     let fields = field_map
         .iter()
         .map(|(field_name, uri)| {
@@ -531,7 +518,7 @@ fn typedef_name(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -
             !required,
         )),
         Untyped => Ok(GENERIC_TYPE.clone().optional(!required)),
-        Object { .. } | _ => Ok(Type::Named(uri.to_type_name()?).optional(!required)),
+        Object { .. } | _ => Ok(Type::Named(uri.to_ident()?).optional(!required)),
     }
 }
 
@@ -549,13 +536,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_uri_to_type_name() {
+    fn test_uri_to_ident() {
         let id1 = Uri::new("root", "#/this/is/some/route/my type");
-        assert_eq!(id1.to_type_name().unwrap().deref(), "RootThisIsSomeRouteMyType");
+        assert_eq!(id1.to_ident().unwrap().deref(), "RootThisIsSomeRouteMyType");
         let id2 = Uri::new("root", "#/properties/aProp");
-        assert_eq!(id2.to_type_name().unwrap().deref(), "RootAprop");
+        assert_eq!(id2.to_ident().unwrap().deref(), "RootAprop");
         let id3 = Uri::new("root", "#");
-        assert_eq!(id3.to_type_name().unwrap().deref(), "Root");
+        assert_eq!(id3.to_ident().unwrap().deref(), "Root");
         // TODO make this work
         // let id4: Uri = "#more".into();
         // assert_eq!(id3.to_name("root"), "More");

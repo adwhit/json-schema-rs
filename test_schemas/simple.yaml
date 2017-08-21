@@ -69,14 +69,16 @@ definitions:
   #     - type: number
   #     - type: array    # TODO This doesn't work
 
-  # combine these:
-  #   allOf:
-  #     - properties:
-  #         name:
-  #           type: string
-  #     - properties:
-  #         height:
-  #           type: number
+  combine these:
+    allOf:
+      - properties:
+          name:
+            type: string
+      - properties:
+          height:
+            type: number
+        required:
+          - height
 
   some enum:
     enum:
