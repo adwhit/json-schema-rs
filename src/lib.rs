@@ -7,7 +7,6 @@ extern crate serde_json;
 extern crate serde_yaml;
 extern crate inflector;
 extern crate regex;
-#[macro_use]
 extern crate simple_codegen;
 #[macro_use]
 extern crate lazy_static;
@@ -213,6 +212,7 @@ impl Schema {
                         format!("Failed to get schema type for {:?}", st)
                     })
                 })
+                // No type specfied - default to Object
                 .unwrap_or(Ok(ST::Object))?;
             match st {
                 ST::Boolean => Primitive(PrimEnum::Boolean),
@@ -273,7 +273,10 @@ fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Struct> 
                 let nexturi = uri.join("allOf");
                 all_of_to_struct(uris, &nexturi, map)
             }
-            _ => Err(ErrorKind::from("AllOf members must be objects").into()),
+            other => Err(
+                ErrorKind::from(format!("AllOf members must be objects - found {:?}", other))
+                    .into(),
+            ),
         })
         .collect::<Result<Vec<Struct>>>()?;
     let name = uri.to_ident()?;
@@ -420,7 +423,7 @@ impl MetaSchema {
         match *self {
             Map(_) | Primitive(_) | Reference(_) | Array(_) | Untyped => {
                 let name = uri.to_ident()?;
-                let inner = typedef(uri, self, true, map)?;
+                let inner = typedef(uri, self, false, map)?;
                 Ok(Box::new(Alias::new(name, Visibility::Public, inner)))
             }
             AnyOf(ref uris) | OneOf(ref uris) => {
@@ -428,7 +431,7 @@ impl MetaSchema {
                 let variants = uris.iter()
                     .map(|uri| {
                         mapget(map, &uri).and_then(|elem| {
-                            typedef(uri, elem, true, map).and_then(|typ| {
+                            typedef(uri, elem, false, map).and_then(|typ| {
                                 let name = Id::valid(typ.to_string())?;
                                 Ok(Variant::new(name, Some(typ), vec![]))
                             })
@@ -474,8 +477,8 @@ fn object_to_struct(
         .iter()
         .map(|(field_name, uri)| {
             let metaschema = mapget(map, &uri)?;
-            let is_required = required_keys.contains(field_name);
-            let typ = typedef(uri, metaschema, is_required, map)?;
+            let optional = !required_keys.contains(field_name);
+            let typ = typedef(uri, metaschema, optional, map)?;
             Ok(Field::with_rename(field_name.as_str(), typ)?)
         })
         .collect::<Result<Vec<Field>>>()?;
@@ -496,28 +499,24 @@ fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
 /// Fetch the name of the type referred to by the metaschema
 /// e.g. for "type MyVec = Vec<Data>", 'Vec<Data>' is the typedef name.
 /// The name will be inferred from the uri if necessary
-fn typedef(uri: &Uri, meta: &MetaSchema, required: bool, map: &SchemaMap) -> Result<Type> {
+fn typedef(uri: &Uri, meta: &MetaSchema, optional: bool, map: &SchemaMap) -> Result<Type> {
     use MetaSchema::*;
     match *meta {
-        Reference(ref uri) => mapget(map, uri).and_then(|deref| typedef(uri, deref, required, map)),
-        Primitive(prim) => Ok(Type::Primitive(prim).optional(!required)),
+        Reference(ref uri) => mapget(map, uri).and_then(|deref| typedef(uri, deref, optional, map)),
+        Primitive(prim) => Ok(Type::Primitive(prim).optional(optional)),
         Array(Some(ref items_uri)) => {
             let meta = mapget(map, items_uri)?;
-            Ok(Type::Vec(
-                Box::new(typedef(items_uri, meta, required, map)?),
-            ))
+            Ok(Type::Vec(Box::new(typedef(items_uri, meta, false, map)?)).optional(optional))
         }
         Map(ref items_uri) => {
             let meta = mapget(map, items_uri)?;
             Ok(Type::Map(
-                Box::new(typedef(items_uri, meta, required, map)?),
+                Box::new(typedef(items_uri, meta, optional, map)?),
             ))
         }
-        Array(None) => Ok(Type::Vec(Box::new(GENERIC_TYPE.clone())).optional(
-            !required,
-        )),
-        Untyped => Ok(GENERIC_TYPE.clone().optional(!required)),
-        Object { .. } | _ => Ok(Type::Named(uri.to_ident()?).optional(!required)),
+        Array(None) => Ok(Type::Vec(Box::new(GENERIC_TYPE.clone())).optional(optional)),
+        Untyped => Ok(GENERIC_TYPE.clone().optional(optional)),
+        Object { .. } | _ => Ok(Type::Named(uri.to_ident()?).optional(optional)),
     }
 }
 
@@ -557,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_meta_schema() {
-        let root = RootSchema::from_file_yaml("schema".into(), "test_schemas/metaschema.json")
+        let root = RootSchema::from_file_json("schema".into(), "test_schemas/metaschema.json")
             .unwrap();
         let out = root.generate().unwrap();
         println!("{}", out);
