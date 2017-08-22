@@ -4,11 +4,11 @@ pub type Map<T> = BTreeMap<String, T>;
 
 pub type PositiveInteger = i64;
 pub type PositiveIntegerDefault0 = serde_json::Value;
-pub type SchemaArray = Vec<Schema>;
+pub type SchemaArray = Vec<Schema6>;
 pub type StringArray = Vec<String>;
 
 #[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
-pub struct Schema {
+pub struct Schema6 {
     #[serde(rename = "$ref")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_: Option<String>,
@@ -20,7 +20,7 @@ pub struct Schema {
     pub additional_items: Option<serde_json::Value>,
     #[serde(rename = "additionalProperties")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub additional_properties: Option<BoolOrSchema>,
+    pub additional_properties: Option<Box<Schema6>>,
     #[serde(rename = "allOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub all_of: Option<SchemaArray>,
@@ -30,7 +30,7 @@ pub struct Schema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub definitions: Option<Map<Schema>>,
+    pub definitions: Option<Map<Schema6>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<Map<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,7 +74,7 @@ pub struct Schema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiple_of: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub not: Option<Box<Schema>>,
+    pub not: Option<Box<Schema6>>,
     #[serde(rename = "oneOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub one_of: Option<SchemaArray>,
@@ -82,9 +82,9 @@ pub struct Schema {
     pub pattern: Option<String>,
     #[serde(rename = "patternProperties")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pattern_properties: Option<Map<Schema>>,
+    pub pattern_properties: Option<Map<Schema6>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<Map<Schema>>,
+    pub properties: Option<Map<Schema6>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<StringArray>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,13 +118,6 @@ pub enum SimpleType {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum BoolOrSchema {
-    Bool(bool),
-    Schema(Box<Schema>),
-}
-
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-#[serde(untagged)]
 pub enum SchemaType {
     SimpleType(SimpleType),
     SimpleTypes(Vec<SimpleType>),
@@ -133,8 +126,8 @@ pub enum SchemaType {
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SchemaItems {
-    Schema(Box<Schema>),
+    Schema(Box<Schema6>),
     Schemas(Schemas),
 }
 
-type Schemas = Vec<Schema>;
+type Schemas = Vec<Schema6>;

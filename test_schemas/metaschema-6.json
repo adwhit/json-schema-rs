@@ -36,6 +36,7 @@
             "default": []
         }
     },
+    "type": ["object", "boolean"],
     "properties": {
         "$id": {
             "type": "string",

@@ -50,7 +50,7 @@ lazy_static! {
 
 type SchemaMap = BTreeMap<Uri, MetaSchema>;
 
-impl fmt::Display for Schema {
+impl fmt::Display for Schema6 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
     }
@@ -169,7 +169,7 @@ enum Identified<'a> {
     Unknown,
 }
 
-impl Schema {
+impl Schema6 {
     fn identify_and_gather(&self, uri: Uri, root: &str, map: &mut SchemaMap) -> Result<()> {
         if let Some(defns) = self.definitions.as_ref() {
             gather_definitions_map(&defns, &uri.join("definitions"), root, map)?;
@@ -189,7 +189,7 @@ impl Schema {
                 })
                 .collect::<Result<Vec<Variant>>>()?;
             Enum(variants)
-        } else if let Some(BoolOrSchema::Schema(ref schema)) = self.additional_properties {
+        } else if let Some(ref schema) = self.additional_properties {
             let ap_uri = uri.join("additionalProperties");
             schema.identify_and_gather(ap_uri.clone(), root, map)?;
             Map(ap_uri)
@@ -289,7 +289,7 @@ fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Struct> 
 }
 
 fn gather_definitions_map(
-    schema_map: &Map<Schema>,
+    schema_map: &Map<Schema6>,
     uri: &Uri,
     root: &str,
     map: &mut SchemaMap,
@@ -324,12 +324,12 @@ fn gather_definitions_vec(
 #[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
 pub struct RootSchema {
     name: String,
-    schema: Schema,
+    schema: Schema6,
 }
 
 impl RootSchema {
     pub fn from_reader_yaml<R: Read>(name: String, reader: R) -> Result<RootSchema> {
-        let schema: Schema = serde_yaml::from_reader(reader)?;
+        let schema: Schema6 = serde_yaml::from_reader(reader)?;
         Ok(RootSchema { name, schema })
     }
 
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_meta_schema() {
-        let root = RootSchema::from_file_json("schema".into(), "test_schemas/metaschema.json")
+        let root = RootSchema::from_file_json("schema".into(), "test_schemas/metaschema-6.json")
             .unwrap();
         let out = root.generate().unwrap();
         println!("{}", out);

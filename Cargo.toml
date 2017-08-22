@@ -1,6 +1,6 @@
 [package]
 authors = ["Alex Whitney <adwhit@fastmail.com>"]
-name = "json-schema-rs"
+name = "json-schema"
 version = "0.1.0"
 
 [dependencies]
