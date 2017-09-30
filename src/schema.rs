@@ -27,14 +27,12 @@ pub struct Schema6 {
     #[serde(rename = "anyOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub any_of: Option<SchemaArray>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub default: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub definitions: Option<Map<Schema6>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub definitions: Option<Map<Schema6>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dependencies: Option<Map<serde_json::Value>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub dependencies:
+        Option<Map<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub description: Option<String>,
     #[serde(rename = "enum")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_: Option<Vec<serde_json::Value>>,
@@ -44,10 +42,8 @@ pub struct Schema6 {
     #[serde(rename = "exclusiveMinimum")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusive_minimum: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<SchemaItems>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub items: Option<SchemaItems>,
     #[serde(rename = "maxItems")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_items: Option<PositiveInteger>,
@@ -57,8 +53,7 @@ pub struct Schema6 {
     #[serde(rename = "maxProperties")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_properties: Option<PositiveInteger>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub maximum: Option<f64>,
     #[serde(rename = "minItems")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_items: Option<PositiveIntegerDefault0>,
@@ -68,27 +63,21 @@ pub struct Schema6 {
     #[serde(rename = "minProperties")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_properties: Option<PositiveIntegerDefault0>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub minimum: Option<f64>,
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiple_of: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub not: Option<Box<Schema6>>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub not: Option<Box<Schema6>>,
     #[serde(rename = "oneOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub one_of: Option<SchemaArray>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub pattern: Option<String>,
     #[serde(rename = "patternProperties")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern_properties: Option<Map<Schema6>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<Map<Schema6>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub required: Option<StringArray>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub properties: Option<Map<Schema6>>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub required: Option<StringArray>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub title: Option<String>,
     #[serde(rename = "type")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_: Option<SchemaType>,
@@ -100,20 +89,13 @@ pub struct Schema6 {
 #[serde(rename = "simpleTypes")]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Serialize, Hash)]
 pub enum SimpleType {
-    #[serde(rename = "array")]
-    Array,
-    #[serde(rename = "boolean")]
-    Boolean,
-    #[serde(rename = "integer")]
-    Integer,
-    #[serde(rename = "null")]
-    Null,
-    #[serde(rename = "number")]
-    Number,
-    #[serde(rename = "object")]
-    Object,
-    #[serde(rename = "string")]
-    String,
+    #[serde(rename = "array")] Array,
+    #[serde(rename = "boolean")] Boolean,
+    #[serde(rename = "integer")] Integer,
+    #[serde(rename = "null")] Null,
+    #[serde(rename = "number")] Number,
+    #[serde(rename = "object")] Object,
+    #[serde(rename = "string")] String,
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]

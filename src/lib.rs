@@ -1,15 +1,15 @@
 #[macro_use]
 extern crate error_chain;
+extern crate inflector;
+#[macro_use]
+extern crate lazy_static;
+extern crate regex;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
 extern crate serde_yaml;
-extern crate inflector;
-extern crate regex;
 extern crate simple_codegen;
-#[macro_use]
-extern crate lazy_static;
 
 use simple_codegen::utils::rust_format;
 use simple_codegen::*;
@@ -89,21 +89,18 @@ impl Uri {
         // TODO: combine arr search regexs
         let re_def = regex::Regex::new(r"/definitions/([^/]+)$").unwrap();
         let re_prop = regex::Regex::new(r"/properties/([^/]+)$").unwrap();
-        let re_allof = regex::Regex::new(r"/allOf$").unwrap();
         let re_allof_entry = regex::Regex::new(r"/allOf/\d+$").unwrap();
-        let re_anyof = regex::Regex::new(r"/anyOf$").unwrap();
-        let re_oneof = regex::Regex::new(r"/oneOf$").unwrap();
         if self.deref().find('/').is_none() {
             Identified::Root
         } else if let Some(c) = re_def.captures(&*self) {
             Identified::Definition(c.get(1).unwrap().as_str())
         } else if let Some(c) = re_prop.captures(&*self) {
             return Identified::Property(c.get(1).unwrap().as_str());
-        } else if re_allof.is_match(&*self) {
+        } else if self.ends_with("/allOf") {
             return Identified::AllOf;
-        } else if re_anyof.is_match(&*self) {
+        } else if self.ends_with("/anyOf") {
             return Identified::AnyOf;
-        } else if re_oneof.is_match(&*self) {
+        } else if self.ends_with("/oneOf") {
             return Identified::OneOf;
         } else if re_allof_entry.is_match(&*self) {
             return Identified::AllOfEntry;
@@ -142,13 +139,11 @@ impl Uri {
         let name = match self.identify() {
             Definition(def) => def.to_pascal_case(),
             Root => self.0.to_pascal_case(),
-            Property(prop) => {
-                format!(
-                    "{}{}",
-                    self.strip_right().strip_right().to_ident()?,
-                    prop.to_pascal_case()
-                )
-            }
+            Property(prop) => format!(
+                "{}{}",
+                self.strip_right().strip_right().to_ident()?,
+                prop.to_pascal_case()
+            ),
             AllOfEntry => "XXX This should never be rendered".into(),
             AllOf | AnyOf | OneOf => return self.strip_right().to_ident(),
             Unknown => (&*self).replace("/", " ").to_pascal_case(),
@@ -172,7 +167,7 @@ enum Identified<'a> {
 impl Schema6 {
     fn identify_and_gather(&self, uri: Uri, root: &str, map: &mut SchemaMap) -> Result<()> {
         if let Some(defns) = self.definitions.as_ref() {
-            gather_definitions_map(&defns, &uri.join("definitions"), root, map)?;
+            gather_definitions_map(defns, &uri.join("definitions"), root, map)?;
         }
         use MetaSchema::*;
         let meta = if let Some(ref_) = self.ref_.as_ref() {
@@ -182,7 +177,7 @@ impl Schema6 {
                 .iter()
                 .map(|enm| {
                     enm.as_str()
-                        .ok_or(ErrorKind::from("enum items must be strings").into())
+                        .ok_or_else(|| ErrorKind::from("enum items must be strings").into())
                         .and_then(|name| {
                             Ok(Variant::new(Id::valid(name.to_string())?, None, vec![]))
                         })
@@ -229,9 +224,9 @@ impl Schema6 {
                                 schema.identify_and_gather(uri.clone(), root, map)?;
                                 Ok(Some(uri))
                             }
-                            SchemaItems::Schemas(_) => Err(ErrorKind::from(
-                                "Multiple array items not supported",
-                            )),
+                            SchemaItems::Schemas(_) => {
+                                Err(ErrorKind::from("Multiple array items not supported"))
+                            }
                         })
                         .unwrap_or(Ok(None))?;
                     Array(uri)
@@ -240,11 +235,11 @@ impl Schema6 {
                     if let Some(ref props) = self.properties {
                         let required: HashSet<String> = self.required
                             .as_ref()
-                            .map(|v| v.iter().map(|s| s.clone()).collect())
-                            .unwrap_or(HashSet::new());
+                            .map(|v| v.iter().cloned().collect())
+                            .unwrap_or_default();
                         let fields =
-                            gather_definitions_map(&props, &uri.join("properties"), root, map)?;
-                        if fields.len() == 0 {
+                            gather_definitions_map(props, &uri.join("properties"), root, map)?;
+                        if fields.is_empty() {
                             Untyped
                         } else {
                             Object { required, fields }
@@ -264,7 +259,7 @@ impl Schema6 {
 
 fn all_of_to_struct(uris: &[Uri], uri: &Uri, map: &SchemaMap) -> Result<Struct> {
     let structs = uris.iter()
-        .map(|field_uri| match mapget(map, &field_uri)?.resolve(map)? {
+        .map(|field_uri| match mapget(map, field_uri)?.resolve(map)? {
             &MetaSchema::Object {
                 ref required,
                 ref fields,
@@ -430,7 +425,7 @@ impl MetaSchema {
                 let name = uri.to_ident()?;
                 let variants = uris.iter()
                     .map(|uri| {
-                        mapget(map, &uri).and_then(|elem| {
+                        mapget(map, uri).and_then(|elem| {
                             typedef(uri, elem, false, map).and_then(|typ| {
                                 let name = Id::valid(typ.to_string())?;
                                 Ok(Variant::new(name, Some(typ), vec![]))
@@ -476,7 +471,7 @@ fn object_to_struct(
     let fields = field_map
         .iter()
         .map(|(field_name, uri)| {
-            let metaschema = mapget(map, &uri)?;
+            let metaschema = mapget(map, uri)?;
             let optional = !required_keys.contains(field_name);
             let typ = typedef(uri, metaschema, optional, map)?;
             Ok(Field::with_rename(field_name.as_str(), typ)?)
@@ -491,13 +486,12 @@ fn object_to_struct(
 }
 
 fn mapget<'a>(map: &'a SchemaMap, uri: &'a Uri) -> Result<&'a MetaSchema> {
-    map.get(uri).ok_or_else(|| {
-        format!("Dereference failed for {}", uri).into()
-    })
+    map.get(uri)
+        .ok_or_else(|| format!("Dereference failed for {}", uri).into())
 }
 
 /// Fetch the name of the type referred to by the metaschema
-/// e.g. for "type MyVec = Vec<Data>", 'Vec<Data>' is the typedef name.
+/// e.g. for "type `MyVec` = Vec<Data>", 'Vec<Data>' is the typedef name.
 /// The name will be inferred from the uri if necessary
 fn typedef(uri: &Uri, meta: &MetaSchema, optional: bool, map: &SchemaMap) -> Result<Type> {
     use MetaSchema::*;
@@ -548,16 +542,16 @@ mod tests {
 
     #[test]
     fn test_simple_schema() {
-        let root = RootSchema::from_file_yaml("test simple".into(), "test_schemas/simple.yaml")
-            .unwrap();
+        let root =
+            RootSchema::from_file_yaml("test simple".into(), "test_schemas/simple.yaml").unwrap();
         let out = root.generate().unwrap();
         println!("{}", out);
     }
 
     #[test]
     fn test_meta_schema() {
-        let root = RootSchema::from_file_json("schema".into(), "test_schemas/metaschema-6.json")
-            .unwrap();
+        let root =
+            RootSchema::from_file_json("schema".into(), "test_schemas/metaschema-6.json").unwrap();
         let out = root.generate().unwrap();
         println!("{}", out);
     }
